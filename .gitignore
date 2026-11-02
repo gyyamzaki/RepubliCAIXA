@@ -1,0 +1,15 @@
+# Configuração local
+/config/database.php
+
+# Arquivos enviados pelos usuários
+/public/uploads/*
+!/public/uploads/.gitkeep
+
+# IDE / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

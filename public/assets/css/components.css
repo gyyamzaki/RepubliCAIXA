@@ -1,0 +1,10 @@
+.card { padding: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.card-label { display: block; margin-bottom: var(--space-3); color: var(--color-text-muted); font-size: .9rem; }
+.card-value { font-size: 1.75rem; }
+.button { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: 0 var(--space-4); border: 0; border-radius: var(--radius-sm); cursor: pointer; font-weight: 600; }
+.button-primary { background: var(--color-primary); color: #fff; }
+.button-primary:hover { background: var(--color-primary-hover); }
+.status-success { color: var(--color-success); }
+.status-warning { color: var(--color-warning); }
+.status-danger { color: var(--color-danger); }
+.error-card { width: min(100%, 520px); }
