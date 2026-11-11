@@ -2,8 +2,6 @@
 
 declare(strict_types=1);
 
-session_start();
-
 spl_autoload_register(function (string $class): void {
     $prefix = 'App\\';
     $baseDir = dirname(__DIR__) . '/app/';
@@ -20,7 +18,12 @@ spl_autoload_register(function (string $class): void {
     }
 });
 
+use App\Core\Session;
+
+Session::start();
+
 $routes = require dirname(__DIR__) . '/routes/web.php';
+
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $routeKey = $method . ' ' . $uri;
