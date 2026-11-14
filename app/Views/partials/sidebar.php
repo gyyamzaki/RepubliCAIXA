@@ -1,3 +1,4 @@
+
 <?php
 
 use App\Core\Session;
@@ -31,22 +32,27 @@ $user = Session::get('user');
         id="sidebar-navigation"
         aria-label="Navegação principal"
     >
+        <!-- Dashboard -->
         <a class="<?= $currentPage === 'dashboard' ? 'active' : '' ?>" href="/">
             Dashboard
         </a>
 
-        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="#">
+        <!-- TELA 5 - DESPESAS -->
+        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="/despesas">
             Despesas
         </a>
 
+        <!-- Caixa -->
         <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="#">
             Caixa
         </a>
 
+        <!-- Moradores -->
         <a class="<?= $currentPage === 'members' ? 'active' : '' ?>" href="#">
             Moradores
         </a>
 
+        <!-- Perfil -->
         <a class="<?= $currentPage === 'profile' ? 'active' : '' ?>" href="#">
             Perfil
         </a>
