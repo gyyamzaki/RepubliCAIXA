@@ -60,6 +60,16 @@ require dirname(__DIR__)
             class="form"
         >
 
+            <input
+                type="hidden"
+                name="_csrf"
+                value="<?= htmlspecialchars(
+                    $csrfToken,
+                    ENT_QUOTES,
+                    'UTF-8'
+                ) ?>"
+            >
+
             <div class="form-group">
 
                 <label for="name">

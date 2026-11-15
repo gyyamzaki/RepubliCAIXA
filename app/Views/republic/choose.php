@@ -13,6 +13,17 @@ require dirname(__DIR__) . '/partials/header.php';
             </p>
         </header>
 
+        <form action="/logout" method="post" class="republic-logout">
+            <input
+                type="hidden"
+                name="_csrf"
+                value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>"
+            >
+            <button type="submit" class="button button-secondary">
+                Sair da conta
+            </button>
+        </form>
+
         <?php if (!empty($errors)): ?>
             <div class="alert alert-danger">
                 <?php foreach ($errors as $error): ?>

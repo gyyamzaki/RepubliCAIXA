@@ -2,6 +2,8 @@
 
 use App\Controllers\AuthController;
 use App\Controllers\DashboardController;
+use App\Controllers\MemberController;
+use App\Controllers\ProfileController;
 use App\Controllers\RepublicController;
 
 return [
@@ -54,6 +56,46 @@ return [
     'POST /republica/entrar' => function (): void {
         (new RepublicController())
             ->join();
+    },
+
+    'GET /republica/configuracoes' => function (): void {
+        (new RepublicController())
+            ->settings();
+    },
+
+    'POST /republica/configuracoes' => function (): void {
+        (new RepublicController())
+            ->updateSettings();
+    },
+
+    'GET /republica/moradores' => function (): void {
+        (new MemberController())
+            ->index();
+    },
+
+    'POST /republica/moradores/funcao' => function (): void {
+        (new MemberController())
+            ->changeRole();
+    },
+
+    'POST /republica/moradores/remover' => function (): void {
+        (new MemberController())
+            ->remove();
+    },
+
+    'GET /perfil' => function (): void {
+        (new ProfileController())
+            ->index();
+    },
+
+    'POST /perfil' => function (): void {
+        (new ProfileController())
+            ->update();
+    },
+
+    'POST /perfil/senha' => function (): void {
+        (new ProfileController())
+            ->changePassword();
     },
 
 ];

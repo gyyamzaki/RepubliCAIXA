@@ -24,6 +24,9 @@ final class AuthService
         string $password
     ): int {
 
+        $name = trim($name);
+        $email = strtolower(trim($email));
+
         $statement =
             $this->db->prepare(
                 'SELECT id
@@ -66,10 +69,49 @@ final class AuthService
             $this->db->lastInsertId();
     }
 
+    public function findActiveSessionUser(
+        int $userId,
+        string $email
+    ): ?array {
+        $email = strtolower(trim($email));
+
+        $statement =
+            $this->db->prepare(
+                'SELECT
+                    id,
+                    name,
+                    email
+                 FROM users
+                 WHERE id = :id
+                   AND email = :email
+                   AND active = 1
+                 LIMIT 1'
+            );
+
+        $statement->execute([
+            'id' => $userId,
+            'email' => $email,
+        ]);
+
+        $user = $statement->fetch();
+
+        if (!$user) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $user['id'],
+            'name' => $user['name'],
+            'email' => $user['email'],
+        ];
+    }
+
     public function authenticate(
         string $email,
         string $password
     ): ?array {
+
+        $email = strtolower(trim($email));
 
         $statement =
             $this->db->prepare(

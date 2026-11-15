@@ -1,9 +1,11 @@
 <?php
 
+use App\Core\Csrf;
 use App\Core\Session;
 
 $pageTitle = 'RepubliCAIXA - Gestão financeira para repúblicas';
 $user = Session::get('user');
+$logoutCsrfToken = is_array($user) ? Csrf::token() : '';
 
 require __DIR__ . '/partials/header.php';
 ?>
@@ -26,6 +28,17 @@ require __DIR__ . '/partials/header.php';
                     <a class="button button-primary" href="/dashboard">
                         Ir para o painel
                     </a>
+
+                    <form action="/logout" method="post" class="landing-logout-form">
+                        <input
+                            type="hidden"
+                            name="_csrf"
+                            value="<?= htmlspecialchars($logoutCsrfToken, ENT_QUOTES, 'UTF-8') ?>"
+                        >
+                        <button type="submit" class="button button-ghost">
+                            Sair
+                        </button>
+                    </form>
                 <?php else: ?>
                     <a class="button button-ghost" href="/login">
                         Entrar
