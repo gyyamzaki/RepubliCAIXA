@@ -8,7 +8,7 @@ $user = Session::get('user');
 
 <aside class="sidebar">
     <div class="sidebar-header">
-        <a class="brand" href="/">
+        <a class="brand" href="/dashboard">
             <span class="brand-mark">R$</span>
             <span>RepubliCAIXA</span>
         </a>
@@ -31,7 +31,7 @@ $user = Session::get('user');
         id="sidebar-navigation"
         aria-label="Navegação principal"
     >
-        <a class="<?= $currentPage === 'dashboard' ? 'active' : '' ?>" href="/">
+        <a class="<?= $currentPage === 'dashboard' ? 'active' : '' ?>" href="/dashboard">
             Dashboard
         </a>
 

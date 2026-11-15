@@ -1,12 +1,19 @@
 <?php
 
 use App\Controllers\AuthController;
+use App\Controllers\DashboardController;
+use App\Controllers\RepublicController;
 
 return [
 
     'GET /' => function (): void {
         require dirname(__DIR__)
-            . '/app/Views/home.php';
+            . '/app/Views/landing.php';
+    },
+
+    'GET /dashboard' => function (): void {
+        (new DashboardController())
+            ->index();
     },
 
     'GET /cadastro' => function (): void {
@@ -32,6 +39,21 @@ return [
     'POST /logout' => function (): void {
         (new AuthController())
             ->logout();
+    },
+
+    'GET /republica' => function (): void {
+        (new RepublicController())
+            ->choose();
+    },
+
+    'POST /republica/criar' => function (): void {
+        (new RepublicController())
+            ->create();
+    },
+
+    'POST /republica/entrar' => function (): void {
+        (new RepublicController())
+            ->join();
     },
 
 ];

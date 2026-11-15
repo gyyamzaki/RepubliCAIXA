@@ -190,7 +190,7 @@ final class AuthController
             $user
         );
 
-        header('Location: /');
+        header('Location: /republica');
         exit;
     }
 
@@ -198,7 +198,7 @@ final class AuthController
     {
         Session::destroy();
 
-        header('Location: /login');
+        header('Location: /');
         exit;
     }
 }
