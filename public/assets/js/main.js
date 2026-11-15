@@ -40,3 +40,33 @@ if (menuButton && navigation) {
         }
     });
 }
+
+const copyInviteButtons = document.querySelectorAll('[data-copy-invite]');
+
+copyInviteButtons.forEach((copyInviteButton) => {
+    copyInviteButton.addEventListener('click', async () => {
+        const code = copyInviteButton.dataset.inviteCode ?? '';
+        const originalText = copyInviteButton.textContent;
+
+        try {
+            await navigator.clipboard.writeText(code);
+            copyInviteButton.textContent = 'Copiado!';
+
+            window.setTimeout(() => {
+                copyInviteButton.textContent = originalText;
+            }, 1500);
+        } catch {
+            window.prompt('Copie o código da república:', code);
+        }
+    });
+});
+
+document.querySelectorAll('[data-confirm]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+        const message = form.dataset.confirm ?? 'Deseja continuar?';
+
+        if (!window.confirm(message)) {
+            event.preventDefault();
+        }
+    });
+});

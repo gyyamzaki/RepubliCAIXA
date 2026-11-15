@@ -25,6 +25,7 @@ final class RepublicService
             'SELECT
                 r.id,
                 r.name,
+                r.description,
                 r.invite_code,
                 rm.role
              FROM republic_members rm
@@ -36,10 +37,7 @@ final class RepublicService
              LIMIT 1'
         );
 
-        $statement->execute([
-            'user_id' => $userId,
-        ]);
-
+        $statement->execute(['user_id' => $userId]);
         $republic = $statement->fetch();
 
         if (!$republic) {
@@ -49,6 +47,7 @@ final class RepublicService
         return [
             'id' => (int) $republic['id'],
             'name' => $republic['name'],
+            'description' => $republic['description'],
             'invite_code' => $republic['invite_code'],
             'role' => $republic['role'],
         ];
@@ -57,18 +56,7 @@ final class RepublicService
     public function create(int $userId, string $name): array
     {
         $name = trim($name);
-
-        if (strlen($name) < 3) {
-            throw new InvalidArgumentException(
-                'O nome da república deve ter pelo menos 3 caracteres.'
-            );
-        }
-
-        if (strlen($name) > 120) {
-            throw new InvalidArgumentException(
-                'O nome da república é muito longo.'
-            );
-        }
+        $this->validateName($name);
 
         if ($this->findActiveByUser($userId) !== null) {
             throw new InvalidArgumentException(
@@ -125,6 +113,7 @@ final class RepublicService
         return [
             'id' => $republicId,
             'name' => $name,
+            'description' => null,
             'invite_code' => $inviteCode,
             'role' => 'admin',
         ];
@@ -147,17 +136,14 @@ final class RepublicService
         }
 
         $statement = $this->db->prepare(
-            'SELECT id, name, invite_code
+            'SELECT id, name, description, invite_code
              FROM republics
              WHERE invite_code = :invite_code
                AND active = 1
              LIMIT 1'
         );
 
-        $statement->execute([
-            'invite_code' => $inviteCode,
-        ]);
-
+        $statement->execute(['invite_code' => $inviteCode]);
         $republic = $statement->fetch();
 
         if (!$republic) {
@@ -210,9 +196,93 @@ final class RepublicService
         return [
             'id' => (int) $republic['id'],
             'name' => $republic['name'],
+            'description' => $republic['description'],
             'invite_code' => $republic['invite_code'],
             'role' => 'member',
         ];
+    }
+
+    public function updateSettings(
+        int $republicId,
+        int $userId,
+        string $name,
+        string $description
+    ): array {
+        $this->requireAdmin($republicId, $userId);
+
+        $name = trim($name);
+        $description = trim($description);
+
+        $this->validateName($name);
+
+        if (strlen($description) > 255) {
+            throw new InvalidArgumentException(
+                'A descrição deve possuir no máximo 255 caracteres.'
+            );
+        }
+
+        $statement = $this->db->prepare(
+            'UPDATE republics
+             SET name = :name,
+                 description = :description
+             WHERE id = :id
+               AND active = 1'
+        );
+
+        $statement->execute([
+            'name' => $name,
+            'description' => $description !== '' ? $description : null,
+            'id' => $republicId,
+        ]);
+
+        $republic = $this->findActiveByUser($userId);
+
+        if ($republic === null) {
+            throw new RuntimeException(
+                'Não foi possível atualizar os dados da república.'
+            );
+        }
+
+        return $republic;
+    }
+
+    private function validateName(string $name): void
+    {
+        if (strlen($name) < 3) {
+            throw new InvalidArgumentException(
+                'O nome da república deve ter pelo menos 3 caracteres.'
+            );
+        }
+
+        if (strlen($name) > 120) {
+            throw new InvalidArgumentException(
+                'O nome da república é muito longo.'
+            );
+        }
+    }
+
+    private function requireAdmin(int $republicId, int $userId): void
+    {
+        $statement = $this->db->prepare(
+            'SELECT id
+             FROM republic_members
+             WHERE republic_id = :republic_id
+               AND user_id = :user_id
+               AND role = "admin"
+               AND active = 1
+             LIMIT 1'
+        );
+
+        $statement->execute([
+            'republic_id' => $republicId,
+            'user_id' => $userId,
+        ]);
+
+        if (!$statement->fetch()) {
+            throw new InvalidArgumentException(
+                'Você não possui permissão para alterar a república.'
+            );
+        }
     }
 
     private function generateInviteCode(): string
@@ -227,9 +297,7 @@ final class RepublicService
                  LIMIT 1'
             );
 
-            $statement->execute([
-                'code' => $code,
-            ]);
+            $statement->execute(['code' => $code]);
         } while ($statement->fetch());
 
         return $code;

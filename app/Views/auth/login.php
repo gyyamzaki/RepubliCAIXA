@@ -33,6 +33,14 @@ require dirname(__DIR__)
 
         </div>
 
+        <?php if (($_GET['session'] ?? '') === 'expired'): ?>
+
+            <div class="alert alert-warning">
+                Sua sessão anterior não corresponde mais a uma conta ativa. Entre novamente.
+            </div>
+
+        <?php endif; ?>
+
         <?php if (
             isset($_GET['registered'])
         ): ?>
@@ -69,6 +77,16 @@ require dirname(__DIR__)
             method="post"
             class="form"
         >
+
+            <input
+                type="hidden"
+                name="_csrf"
+                value="<?= htmlspecialchars(
+                    $csrfToken,
+                    ENT_QUOTES,
+                    'UTF-8'
+                ) ?>"
+            >
 
             <div class="form-group">
 

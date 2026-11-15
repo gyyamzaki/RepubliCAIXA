@@ -1,9 +1,11 @@
 <?php
 
+use App\Core\Csrf;
 use App\Core\Session;
 
 $currentPage = $currentPage ?? '';
 $user = Session::get('user');
+$logoutCsrfToken = Csrf::token();
 ?>
 
 <aside class="sidebar">
@@ -35,24 +37,33 @@ $user = Session::get('user');
             Dashboard
         </a>
 
-        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="#">
+        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="/despesas">
             Despesas
         </a>
 
-        <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="#">
+        <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="/caixa">
             Caixa
         </a>
 
-        <a class="<?= $currentPage === 'members' ? 'active' : '' ?>" href="#">
+        <a class="<?= $currentPage === 'reports' ? 'active' : '' ?>" href="/relatorios">
+            Relatórios
+        </a>
+
+        <a class="<?= $currentPage === 'members' ? 'active' : '' ?>" href="/republica/moradores">
             Moradores
         </a>
 
-        <a class="<?= $currentPage === 'profile' ? 'active' : '' ?>" href="#">
+        <a class="<?= $currentPage === 'profile' ? 'active' : '' ?>" href="/perfil">
             Perfil
         </a>
 
         <?php if ($user): ?>
             <form action="/logout" method="post" class="sidebar-logout">
+                <input
+                    type="hidden"
+                    name="_csrf"
+                    value="<?= htmlspecialchars($logoutCsrfToken, ENT_QUOTES, 'UTF-8') ?>"
+                >
                 <button type="submit" class="sidebar-logout-button">
                     Sair
                 </button>

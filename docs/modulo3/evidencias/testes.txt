@@ -1,0 +1,76 @@
+Banco de testes criado: republicaixa_finance_test_20261114162223_5faa
+OK Precisão de centavos
+OK Formatação monetária
+OK Mês inválido rejeitado
+OK Mês inválido rejeitado
+OK Mês inválido rejeitado
+OK Mês inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Lançamento inválido rejeitado
+OK Fórmula CSV neutralizada
+OK Perfis obtidos do banco
+OK Conta sem república
+OK Saldo anterior, entradas, saídas e fechamento
+OK JOIN de pagamentos não duplica despesas
+OK Somente confirmado e legado quitado contam como pago
+OK Pendência do mês
+OK Pendência global inclui outros meses
+OK Rateio por morador concilia com despesas
+OK Consultas isolam repúblicas
+OK Morador não movimenta caixa
+OK Administrador externo não movimenta caixa
+OK Saída acima do saldo rejeitada
+OK Saída retroativa que cria saldo negativo rejeitada
+OK Falhas fazem rollback sem alterar saldo
+OK Confirmação de parcela não altera reserva
+OK Confirmação atualiza indicador de quitação
+OK Usuário desativado perde acesso
+34 verificações aprovadas.
+OK Duas saídas simultâneas: uma aceita, outra rejeitada; saldo final R$ 25,00.
+OK Rota protegida: /
+OK Rota protegida: /caixa
+OK Rota protegida: /relatorios
+OK Rota protegida: /relatorios/exportar?tipo=caixa&month=2026-11
+OK Login admin
+OK Dashboard integra despesas e reserva
+OK Dashboard não expõe outra república
+OK Filtro inválido retorna erro tratado
+OK Campo em formato de array tratado
+OK Caixa disponível
+OK CSRF inválido rejeitado
+OK Saldo insuficiente tratado na tela
+OK Entrada confirmada redireciona
+OK Reenvio do formulário não duplica lançamento
+OK Caixa disponível
+OK Texto com HTML pode ser armazenado como dado
+OK XSS armazenado escapado na exibição
+OK Caixa disponível
+OK XSS refletido escapado em erro de formulário
+OK Caixa disponível
+OK Texto de injeção SQL registrado como dado
+OK Tabela e registros preservados após entrada SQL
+OK Caixa disponível
+OK Descrição de teste de CSV registrada
+OK Exportação CSV neutraliza fórmula e isola república
+OK Exportação de despesas correta
+OK Login member
+OK Morador consulta sem formulário de lançamento
+OK Morador não consegue gravar por requisição direta
+OK Login outsider
+OK Parâmetro forjado não muda a república autorizada
+OK Login none
+OK Conta sem vínculo tem resposta clara
+OK Tela de despesas do colega preservada
+OK Confirmação real de parcela funciona
+OK Pagamento real de despesa não altera reserva
+OK Relatório reflete pagamento confirmado
+37 verificações HTTP aprovadas.
+Concluído: 34 verificações de cálculo/serviço, 1 cenário concorrente e 37 verificações HTTP.

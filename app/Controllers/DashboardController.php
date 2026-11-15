@@ -21,20 +21,19 @@ final class DashboardController
     {
         $user = AuthMiddleware::requireLogin();
 
-        $republic = Session::get('republic');
+        // Revalida a participação no banco em cada acesso ao painel.
+        // Assim, uma sessão antiga não mantém acesso após a remoção da república.
+        $republic = $this->republicService->findActiveByUser(
+            (int) $user['id']
+        );
 
-        if (!is_array($republic)) {
-            $republic = $this->republicService->findActiveByUser(
-                (int) $user['id']
-            );
-
-            if ($republic === null) {
-                header('Location: /republica');
-                exit;
-            }
-
-            Session::set('republic', $republic);
+        if ($republic === null) {
+            Session::remove('republic');
+            header('Location: /republica');
+            exit;
         }
+
+        Session::set('republic', $republic);
 
         $pageTitle = 'Dashboard - RepubliCAIXA';
         $currentPage = 'dashboard';

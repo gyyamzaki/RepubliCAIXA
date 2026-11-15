@@ -11,5 +11,8 @@ $pageTitle = $pageTitle ?? 'RepubliCAIXA';
     <link rel="stylesheet" href="/assets/css/base.css">
     <link rel="stylesheet" href="/assets/css/layout.css">
     <link rel="stylesheet" href="/assets/css/components.css">
+    <?php if (!empty($financeStyles)): ?>
+    <link rel="stylesheet" href="/assets/css/finance.css">
+    <?php endif; ?>
 </head>
 <body>

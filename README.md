@@ -28,3 +28,17 @@ O arquivo `database/schema.sql` é a referência oficial da estrutura do banco.
 Se alguém alterar uma tabela, deve atualizar esse arquivo antes do merge.
 
 Não enviar `config/database.php` ao GitHub. Cada integrante pode ter credenciais locais diferentes.
+
+## Módulo de Usuários e Repúblicas
+
+Rotas principais já implementadas:
+
+- `/cadastro` - criação de usuário.
+- `/login` - autenticação.
+- `/republica` - criar ou entrar em uma república.
+- `/dashboard` - área interna autenticada.
+- `/republica/moradores` - lista e administração de moradores.
+- `/republica/configuracoes` - dados da república.
+- `/perfil` - dados pessoais e troca de senha.
+
+O roteiro completo de validação está em `TESTES_USUARIOS_REPUBLICAS.md`.

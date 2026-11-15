@@ -23,7 +23,6 @@ final class RepublicController
     public function choose(): void
     {
         $user = AuthMiddleware::requireLogin();
-
         $republic = $this->service->findActiveByUser((int) $user['id']);
 
         if ($republic !== null) {
@@ -47,7 +46,7 @@ final class RepublicController
             return;
         }
 
-        $name = trim($_POST['name'] ?? '');
+        $name = trim((string) ($_POST['name'] ?? ''));
 
         try {
             $republic = $this->service->create((int) $user['id'], $name);
@@ -71,7 +70,7 @@ final class RepublicController
             return;
         }
 
-        $inviteCode = strtoupper(trim($_POST['invite_code'] ?? ''));
+        $inviteCode = strtoupper(trim((string) ($_POST['invite_code'] ?? '')));
 
         try {
             $republic = $this->service->join((int) $user['id'], $inviteCode);
@@ -83,6 +82,63 @@ final class RepublicController
         }
     }
 
+    public function settings(): void
+    {
+        $user = AuthMiddleware::requireLogin();
+        $republic = $this->service->findActiveByUser((int) $user['id']);
+
+        if ($republic === null) {
+            Session::remove('republic');
+            header('Location: /republica');
+            exit;
+        }
+
+        Session::set('republic', $republic);
+
+        $csrfToken = Csrf::token();
+        $flash = Session::get('flash');
+        Session::remove('flash');
+        $isAdmin = $republic['role'] === 'admin';
+        $pageTitle = 'Configurações da República - RepubliCAIXA';
+        $currentPage = 'members';
+
+        require dirname(__DIR__) . '/Views/republic/settings.php';
+    }
+
+    public function updateSettings(): void
+    {
+        $user = AuthMiddleware::requireLogin();
+
+        if (!Csrf::validate($_POST['_csrf'] ?? null)) {
+            $this->flash('danger', 'Requisição inválida. Atualize a página e tente novamente.');
+            $this->redirectSettings();
+        }
+
+        $republic = $this->service->findActiveByUser((int) $user['id']);
+
+        if ($republic === null) {
+            Session::remove('republic');
+            header('Location: /republica');
+            exit;
+        }
+
+        try {
+            $updated = $this->service->updateSettings(
+                (int) $republic['id'],
+                (int) $user['id'],
+                (string) ($_POST['name'] ?? ''),
+                (string) ($_POST['description'] ?? '')
+            );
+
+            Session::set('republic', $updated);
+            $this->flash('success', 'Dados da república atualizados com sucesso.');
+        } catch (InvalidArgumentException | RuntimeException $exception) {
+            $this->flash('danger', $exception->getMessage());
+        }
+
+        $this->redirectSettings();
+    }
+
     private function render(
         array $errors = [],
         string $name = '',
@@ -92,5 +148,19 @@ final class RepublicController
         $csrfToken = Csrf::token();
 
         require dirname(__DIR__) . '/Views/republic/choose.php';
+    }
+
+    private function flash(string $type, string $message): void
+    {
+        Session::set('flash', [
+            'type' => $type,
+            'message' => $message,
+        ]);
+    }
+
+    private function redirectSettings(): never
+    {
+        header('Location: /republica/configuracoes');
+        exit;
     }
 }

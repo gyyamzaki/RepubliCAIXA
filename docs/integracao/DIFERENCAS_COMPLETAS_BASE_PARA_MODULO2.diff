@@ -1,0 +1,5395 @@
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Controllers/ExpenseController.php /mnt/data/integracao_rep/stage2/app/Controllers/ExpenseController.php
+--- /mnt/data/integracao_rep/base/app/Controllers/ExpenseController.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Controllers/ExpenseController.php	2026-11-15 01:33:25.028859992 +0000
+@@ -0,0 +1,514 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Core\Database;
++use App\Core\Session;
++use App\Services\ExpenseRateio;
++use InvalidArgumentException;
++use PDO;
++use Throwable;
++
++final class ExpenseController
++{
++    // Identifica o usuário e sua república
++    private function contexto(): array
++    {
++        $user = Session::get('user');
++
++        if (!is_array($user) || empty($user['id'])) {
++            header('Location: /login');
++            exit;
++        }
++
++        $db = Database::connection();
++
++        $consulta = $db->prepare(
++            'SELECT r.id, r.name
++             FROM republic_members rm
++             JOIN republics r
++               ON r.id = rm.republic_id
++             WHERE rm.user_id = :usuario
++               AND rm.active = 1
++               AND r.active = 1
++             ORDER BY r.id
++             LIMIT 1'
++        );
++
++        $consulta->execute([
++            'usuario' => (int) $user['id']
++        ]);
++
++        $republica = $consulta->fetch() ?: null;
++
++        return [$db, $user, $republica];
++    }
++
++    // TELA 5 - LISTAR DESPESAS
++    public function index(): void
++    {
++        [$db, $user, $republica] = $this->contexto();
++
++        $despesas = [];
++
++        if ($republica !== null) {
++
++            $consulta = $db->prepare(
++                "SELECT
++                    e.id,
++                    e.title,
++                    e.total_amount,
++                    e.expense_date,
++                    e.due_date,
++                    c.name AS category_name,
++
++                    COALESCE(SUM(
++                        CASE
++                            WHEN sh.id IS NULL THEN 0
++                            ELSE GREATEST(
++                                0,
++                                LEAST(
++                                    sh.amount_due,
++                                    CASE
++                                        WHEN sh.status = 'paid'
++                                        THEN sh.amount_due
++                                        ELSE COALESCE(
++                                            p.confirmed_amount, 0
++                                        )
++                                    END
++                                )
++                            )
++                        END
++                    ), 0) AS paid_amount
++
++                FROM expenses e
++
++                LEFT JOIN expense_categories c
++                    ON c.id = e.category_id
++
++                LEFT JOIN expense_shares sh
++                    ON sh.expense_id = e.id
++
++                LEFT JOIN (
++                    SELECT
++                        expense_share_id,
++                        SUM(amount) AS confirmed_amount
++                    FROM payments
++                    WHERE status = 'confirmed'
++                    GROUP BY expense_share_id
++                ) p ON p.expense_share_id = sh.id
++
++                WHERE e.republic_id = :republica
++
++                GROUP BY
++                    e.id,
++                    e.title,
++                    e.total_amount,
++                    e.expense_date,
++                    e.due_date,
++                    c.name
++
++                ORDER BY e.expense_date DESC, e.id DESC"
++            );
++
++            $consulta->execute([
++                'republica' => (int) $republica['id']
++            ]);
++
++            $despesas = $consulta->fetchAll();
++        }
++
++        require dirname(__DIR__)
++            . '/Views/expenses/index.php';
++    }
++
++    // Busca categorias e moradores
++    private function prepararFormulario(
++        PDO $db,
++        int $republicaId
++    ): array {
++
++        $categorias = $db->query(
++            'SELECT id, name
++             FROM expense_categories
++             WHERE active = 1
++             ORDER BY name'
++        )->fetchAll();
++
++        $consulta = $db->prepare(
++            'SELECT rm.id, u.name
++             FROM republic_members rm
++             JOIN users u ON u.id = rm.user_id
++             WHERE rm.republic_id = :republica
++               AND rm.active = 1
++               AND u.active = 1
++             ORDER BY u.name'
++        );
++
++        $consulta->execute([
++            'republica' => $republicaId
++        ]);
++
++        $moradores = $consulta->fetchAll();
++
++        return [$categorias, $moradores];
++    }
++
++    // Token de segurança
++    private function token(): string
++    {
++        $token = Session::get('csrf_despesas');
++
++        if (!is_string($token) || $token === '') {
++            $token = bin2hex(random_bytes(32));
++            Session::set('csrf_despesas', $token);
++        }
++
++        return $token;
++    }
++
++    // TELA 6 - FORMULÁRIO DE CADASTRO
++    public function create(): void
++    {
++        [$db, $user, $republica] = $this->contexto();
++
++        if ($republica === null) {
++            header('Location: /despesas');
++            exit;
++        }
++
++        [$categorias, $moradores] =
++            $this->prepararFormulario(
++                $db,
++                (int) $republica['id']
++            );
++
++        $dados = [];
++
++        $selecionados = array_map(
++            'intval',
++            array_column($moradores, 'id')
++        );
++
++        $erros = [];
++        $csrf = $this->token();
++
++        require dirname(__DIR__)
++            . '/Views/expenses/create.php';
++    }
++
++    // SALVAR DESPESA COM OS 3 TIPOS DE RATEIO
++    public function store(): void
++    {
++        [$db, $user, $republica] = $this->contexto();
++
++        if ($republica === null) {
++            header('Location: /despesas');
++            exit;
++        }
++
++        [$categorias, $moradores] =
++            $this->prepararFormulario(
++                $db,
++                (int) $republica['id']
++            );
++
++        $csrf = $this->token();
++        $dados = $_POST;
++        $erros = [];
++
++        $selecionados = array_values(array_unique(
++            array_map(
++                'intval',
++                (array) ($_POST['members'] ?? [])
++            )
++        ));
++
++        // Verifica o token do formulário
++        if (
++            !is_string($_POST['_csrf'] ?? null) ||
++            !hash_equals($csrf, $_POST['_csrf'])
++        ) {
++            http_response_code(403);
++            exit('Formulário inválido.');
++        }
++
++        try {
++
++            // DADOS DA DESPESA
++            $titulo = trim(
++                (string) ($_POST['title'] ?? '')
++            );
++
++            $descricao = trim(
++                (string) ($_POST['description'] ?? '')
++            );
++
++            $categoria = (int) (
++                $_POST['category_id'] ?? 0
++            );
++
++            $valorTexto = (string) (
++                $_POST['total_amount'] ?? ''
++            );
++
++            $data = (string) (
++                $_POST['expense_date'] ?? ''
++            );
++
++            $vencimento = (string) (
++                $_POST['due_date'] ?? ''
++            );
++
++            // Tipo escolhido no formulário
++            $tipo = (string) (
++                $_POST['split_type'] ?? 'equal'
++            );
++
++            $valores = $_POST['values'] ?? [];
++
++            if (!is_array($valores)) {
++                throw new InvalidArgumentException(
++                    'Valores do rateio inválidos.'
++                );
++            }
++
++            // VALIDAR O TÍTULO
++            $tamanho = preg_match_all('/./us', $titulo);
++
++            if ($tamanho === false ||
++                $tamanho < 2 ||
++                $tamanho > 150
++            ) {
++                throw new InvalidArgumentException(
++                    'Informe um nome de 2 a 150 caracteres.'
++                );
++            }
++
++            if (strlen($descricao) > 5000) {
++                throw new InvalidArgumentException(
++                    'A descrição está muito longa.'
++                );
++            }
++
++            // VALIDAR O VALOR TOTAL
++            $totalCentavos = ExpenseRateio::centavos(
++                $valorTexto
++            );
++
++            if ($totalCentavos <= 0) {
++                throw new InvalidArgumentException(
++                    'O valor deve ser maior que zero.'
++                );
++            }
++
++            // VALIDAR A CATEGORIA
++            $categoriasValidas = array_map(
++                'intval',
++                array_column($categorias, 'id')
++            );
++
++            if (!in_array(
++                $categoria,
++                $categoriasValidas,
++                true
++            )) {
++                throw new InvalidArgumentException(
++                    'Escolha uma categoria válida.'
++                );
++            }
++
++            // VALIDAR AS DATAS
++            foreach ([$data, $vencimento] as $indice => $campo) {
++
++                if ($indice === 1 && $campo === '') {
++                    continue;
++                }
++
++                if (!preg_match(
++                    '/^\d{4}-\d{2}-\d{2}$/D',
++                    $campo
++                )) {
++                    throw new InvalidArgumentException(
++                        'Informe datas válidas.'
++                    );
++                }
++
++                [$ano, $mes, $dia] = array_map(
++                    'intval',
++                    explode('-', $campo)
++                );
++
++                if (!checkdate($mes, $dia, $ano)) {
++                    throw new InvalidArgumentException(
++                        'Informe datas válidas.'
++                    );
++                }
++            }
++
++            // VALIDAR OS MORADORES
++            $idsPermitidos = array_map(
++                'intval',
++                array_column($moradores, 'id')
++            );
++
++            if (
++                !$selecionados ||
++                array_diff($selecionados, $idsPermitidos)
++            ) {
++                throw new InvalidArgumentException(
++                    'Selecione moradores válidos.'
++                );
++            }
++
++            // VALIDAR O TIPO DE RATEIO
++            if (!in_array(
++                $tipo,
++                ['equal', 'percentage', 'custom'],
++                true
++            )) {
++                throw new InvalidArgumentException(
++                    'Tipo de rateio inválido.'
++                );
++            }
++
++            // Verifica os campos de cada participante
++            if ($tipo !== 'equal') {
++                foreach ($selecionados as $moradorId) {
++                    if (
++                        !isset($valores[$moradorId]) ||
++                        !is_scalar($valores[$moradorId])
++                    ) {
++                        throw new InvalidArgumentException(
++                            'Preencha os valores do rateio.'
++                        );
++                    }
++                }
++            }
++
++            // CALCULAR O RATEIO
++            // Esta classe trata os três tipos
++            $partes = ExpenseRateio::calcular(
++                $tipo,
++                $totalCentavos,
++                $selecionados,
++                $valores
++            );
++
++            // INICIAR A TRANSAÇÃO MYSQL
++            $db->beginTransaction();
++
++            // SALVAR A DESPESA
++            $inserir = $db->prepare(
++                'INSERT INTO expenses
++                (
++                    republic_id,
++                    created_by,
++                    category_id,
++                    title,
++                    description,
++                    total_amount,
++                    expense_date,
++                    due_date,
++                    split_type
++                )
++                VALUES
++                (
++                    :republica,
++                    :usuario,
++                    :categoria,
++                    :titulo,
++                    :descricao,
++                    :valor,
++                    :data,
++                    :vencimento,
++                    :tipo
++                )'
++            );
++
++            $inserir->execute([
++                'republica' => (int) $republica['id'],
++                'usuario' => (int) $user['id'],
++                'categoria' => $categoria,
++                'titulo' => $titulo,
++                'descricao' => $descricao,
++                'valor' => number_format(
++                    $totalCentavos / 100, 2, '.', ''
++                ),
++                'data' => $data,
++                'vencimento' => $vencimento !== ''
++                    ? $vencimento
++                    : null,
++                'tipo' => $tipo
++            ]);
++
++            // ID DA DESPESA CRIADA
++            $despesaId = (int) $db->lastInsertId();
++
++            // SALVAR O RATEIO DOS MORADORES
++            $inserirParte = $db->prepare(
++                'INSERT INTO expense_shares
++                (
++                    expense_id,
++                    member_id,
++                    amount_due,
++                    percentage
++                )
++                VALUES
++                (
++                    :despesa,
++                    :morador,
++                    :valor,
++                    :percentual
++                )'
++            );
++
++            foreach ($partes as $moradorId => $parte) {
++
++                $inserirParte->execute([
++                    'despesa' => $despesaId,
++                    'morador' => (int) $moradorId,
++
++                    'valor' => number_format(
++                        $parte['centavos'] / 100,
++                        2,
++                        '.',
++                        ''
++                    ),
++
++                    'percentual' => $parte['percentual']
++                ]);
++            }
++
++            // CONFIRMAR O CADASTRO
++            $db->commit();
++
++            // Voltar para a Tela 5
++            header('Location: /despesas', true, 303);
++            exit;
++
++        } catch (InvalidArgumentException $erro) {
++
++            if ($db->inTransaction()) {
++                $db->rollBack();
++            }
++
++            $erros[] = $erro->getMessage();
++
++        } catch (Throwable $erro) {
++
++            if ($db->inTransaction()) {
++                $db->rollBack();
++            }
++
++            error_log((string) $erro);
++
++            $erros[] =
++                'Não foi possível salvar a despesa.';
++        }
++
++        // Retorna ao formulário caso haja erro
++        require dirname(__DIR__)
++            . '/Views/expenses/create.php';
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Controllers/ExpenseDetailsController.php /mnt/data/integracao_rep/stage2/app/Controllers/ExpenseDetailsController.php
+--- /mnt/data/integracao_rep/base/app/Controllers/ExpenseDetailsController.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Controllers/ExpenseDetailsController.php	2026-11-15 01:33:25.030723877 +0000
+@@ -0,0 +1,210 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Core\Database;
++use App\Core\Session;
++use PDO;
++
++final class ExpenseDetailsController
++{
++    public function show(): void
++    {
++        // VERIFICAR LOGIN
++        $usuario = Session::get('user');
++
++        if (!is_array($usuario) || empty($usuario['id'])) {
++            header('Location: /login');
++            exit;
++        }
++
++        // IDENTIFICAR DESPESA
++        $id = filter_input(
++            INPUT_GET,
++            'id',
++            FILTER_VALIDATE_INT
++        );
++
++        if (!$id || $id < 1) {
++            http_response_code(404);
++            exit('Despesa não encontrada.');
++        }
++
++        $db = Database::connection();
++
++        // BUSCAR DESPESA E VERIFICAR REPÚBLICA
++        $consulta = $db->prepare(
++            'SELECT
++                e.*,
++                c.name AS category_name,
++                u.name AS creator_name,
++                r.name AS republic_name
++             FROM expenses e
++             INNER JOIN republics r
++                ON r.id = e.republic_id
++             INNER JOIN republic_members acesso
++                ON acesso.republic_id = e.republic_id
++               AND acesso.user_id = :usuario
++               AND acesso.active = 1
++             INNER JOIN users u
++                ON u.id = e.created_by
++             LEFT JOIN expense_categories c
++                ON c.id = e.category_id
++             WHERE e.id = :despesa
++               AND r.active = 1
++             LIMIT 1'
++        );
++
++        $consulta->execute([
++            'usuario' => (int) $usuario['id'],
++            'despesa' => $id
++        ]);
++
++        $despesa = $consulta->fetch(PDO::FETCH_ASSOC);
++
++        if (!$despesa) {
++            http_response_code(404);
++            exit('Despesa não encontrada nesta república.');
++        }
++
++        // BUSCAR RATEIO E PAGAMENTOS
++        $consulta = $db->prepare(
++            "SELECT
++                s.id AS share_id,
++                s.member_id,
++                s.amount_due,
++                s.percentage,
++                s.status AS share_status,
++                u.name AS member_name,
++
++                COALESCE(
++                    SUM(
++                        CASE
++                            WHEN p.status = 'confirmed'
++                            THEN p.amount
++                            ELSE 0
++                        END
++                    ), 0
++                ) AS confirmed_amount,
++
++                COALESCE(
++                    SUM(
++                        CASE
++                            WHEN p.status = 'pending'
++                            THEN p.amount
++                            ELSE 0
++                        END
++                    ), 0
++                ) AS pending_amount
++
++             FROM expense_shares s
++
++             INNER JOIN republic_members rm
++                ON rm.id = s.member_id
++
++             INNER JOIN users u
++                ON u.id = rm.user_id
++
++             LEFT JOIN payments p
++                ON p.expense_share_id = s.id
++
++             WHERE s.expense_id = :despesa
++               AND rm.republic_id = :republica
++
++             GROUP BY
++                s.id,
++                s.member_id,
++                s.amount_due,
++                s.percentage,
++                s.status,
++                u.name
++
++             ORDER BY u.name, s.id"
++        );
++
++        $consulta->execute([
++            'despesa' => $id,
++            'republica' => (int) $despesa['republic_id']
++        ]);
++
++        $rateios = $consulta->fetchAll(PDO::FETCH_ASSOC);
++
++        // CALCULAR QUANTO JÁ FOI PAGO
++        $totalPago = 0.0;
++
++        foreach ($rateios as &$parte) {
++
++            $devido = (float) $parte['amount_due'];
++
++            $confirmado = (float)
++                $parte['confirmed_amount'];
++
++            $pago = $parte['share_status'] === 'paid'
++                ? $devido
++                : min(
++                    $devido,
++                    max(0.0, $confirmado)
++                );
++
++            $parte['paid_amount'] = round($pago, 2);
++
++            $parte['remaining_amount'] = round(
++                max(0.0, $devido - $pago),
++                2
++            );
++
++            $totalPago += $parte['paid_amount'];
++        }
++
++        unset($parte);
++
++        $totalPago = round(
++            min(
++                (float) $despesa['total_amount'],
++                $totalPago
++            ),
++            2
++        );
++
++        // BUSCAR HISTÓRICO DE PAGAMENTOS
++        $consulta = $db->prepare(
++            'SELECT
++                p.id,
++                p.expense_share_id,
++                p.amount,
++                p.payment_date,
++                p.status,
++                p.proof_path,
++                u.name AS member_name
++
++             FROM payments p
++
++             INNER JOIN expense_shares s
++                ON s.id = p.expense_share_id
++
++             INNER JOIN republic_members rm
++                ON rm.id = s.member_id
++
++             INNER JOIN users u
++                ON u.id = rm.user_id
++
++             WHERE s.expense_id = :despesa
++               AND rm.republic_id = :republica
++
++             ORDER BY p.payment_date DESC, p.id DESC'
++        );
++
++        $consulta->execute([
++            'despesa' => $id,
++            'republica' => (int) $despesa['republic_id']
++        ]);
++
++        $pagamentos = $consulta->fetchAll(
++            PDO::FETCH_ASSOC
++        );
++
++        // ABRIR TELA 7
++        require dirname(__DIR__)
++            . '/Views/expenses/show.php';
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Controllers/ExpenseEditController.php /mnt/data/integracao_rep/stage2/app/Controllers/ExpenseEditController.php
+--- /mnt/data/integracao_rep/base/app/Controllers/ExpenseEditController.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Controllers/ExpenseEditController.php	2026-11-15 01:33:25.032413406 +0000
+@@ -0,0 +1,565 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Core\Database;
++use App\Core\Session;
++use App\Services\ExpenseRateio;
++use InvalidArgumentException;
++use PDO;
++use Throwable;
++
++final class ExpenseEditController
++{
++    public function edit(): void
++    {
++        // VERIFICAR LOGIN
++        $usuario = Session::get('user');
++
++        if (!is_array($usuario) || empty($usuario['id'])) {
++            header('Location: /login');
++            exit;
++        }
++
++        // IDENTIFICAR A DESPESA
++        $id = filter_input(
++            INPUT_GET,
++            'id',
++            FILTER_VALIDATE_INT,
++            ['options' => ['min_range' => 1]]
++        );
++
++        if (!$id) {
++            http_response_code(404);
++            exit('Despesa não encontrada.');
++        }
++
++        $db = Database::connection();
++
++        // VERIFICAR A REPÚBLICA DO USUÁRIO
++        $consulta = $db->prepare(
++            'SELECT e.*, rm.role
++             FROM expenses e
++             JOIN republic_members rm
++               ON rm.republic_id = e.republic_id
++             JOIN republics r
++               ON r.id = e.republic_id
++             WHERE e.id = :id
++               AND rm.user_id = :usuario
++               AND rm.active = 1
++               AND r.active = 1
++             LIMIT 1'
++        );
++
++        $consulta->execute([
++            'id' => $id,
++            'usuario' => (int) $usuario['id']
++        ]);
++
++        $despesa = $consulta->fetch(PDO::FETCH_ASSOC);
++
++        if (!$despesa) {
++            http_response_code(404);
++            exit('Despesa não encontrada nesta república.');
++        }
++
++        // VERIFICAR PERMISSÃO DE EDIÇÃO
++        if (
++            (int) $despesa['created_by'] !==
++                (int) $usuario['id']
++            &&
++            $despesa['role'] !== 'admin'
++        ) {
++            http_response_code(403);
++            exit('Você não tem permissão para editar.');
++        }
++
++        // BUSCAR CATEGORIAS
++        $categorias = $db->query(
++            'SELECT id, name
++             FROM expense_categories
++             WHERE active = 1
++             ORDER BY name'
++        )->fetchAll(PDO::FETCH_ASSOC);
++
++        // BUSCAR MORADORES
++        $consulta = $db->prepare(
++            'SELECT rm.id, u.name
++             FROM republic_members rm
++             JOIN users u ON u.id = rm.user_id
++             WHERE rm.republic_id = :republica
++               AND rm.active = 1
++               AND u.active = 1
++             ORDER BY u.name'
++        );
++
++        $consulta->execute([
++            'republica' => (int) $despesa['republic_id']
++        ]);
++
++        $moradores = $consulta->fetchAll(
++            PDO::FETCH_ASSOC
++        );
++
++        // BUSCAR RATEIO ATUAL
++        $consulta = $db->prepare(
++            'SELECT member_id, amount_due, percentage, status
++             FROM expense_shares
++             WHERE expense_id = :id
++             ORDER BY member_id'
++        );
++
++        $consulta->execute(['id' => $id]);
++
++        $partesAtuais = $consulta->fetchAll(
++            PDO::FETCH_ASSOC
++        );
++
++        // PREPARAR CAMPOS DO FORMULÁRIO
++        $dados = $despesa;
++        $selecionados = [];
++        $valoresAtuais = [];
++
++        foreach ($partesAtuais as $parte) {
++
++            $moradorId = (int) $parte['member_id'];
++
++            $selecionados[] = $moradorId;
++
++            if ($despesa['split_type'] === 'percentage') {
++
++                $valoresAtuais[$moradorId] =
++                    $parte['percentage'];
++
++            } elseif ($despesa['split_type'] === 'custom') {
++
++                $valoresAtuais[$moradorId] =
++                    $parte['amount_due'];
++            }
++        }
++
++        // VERIFICAR SE EXISTEM PAGAMENTOS
++        $consulta = $db->prepare(
++            'SELECT COUNT(*)
++             FROM payments p
++             JOIN expense_shares s
++               ON s.id = p.expense_share_id
++             WHERE s.expense_id = :id'
++        );
++
++        $consulta->execute(['id' => $id]);
++
++        $temPagamentos =
++            (int) $consulta->fetchColumn() > 0;
++
++        $temPartePaga = false;
++
++        foreach ($partesAtuais as $parte) {
++
++            if ($parte['status'] === 'paid') {
++                $temPartePaga = true;
++                break;
++            }
++        }
++
++        $bloqueada = $temPagamentos || $temPartePaga;
++
++        // TOKEN DE SEGURANÇA
++        $csrf = Session::get('csrf_despesas');
++
++        if (!is_string($csrf) || $csrf === '') {
++
++            $csrf = bin2hex(random_bytes(32));
++
++            Session::set('csrf_despesas', $csrf);
++        }
++
++        $erros = [];
++
++        // PROCESSAR ALTERAÇÕES
++        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
++
++            if (
++                !is_string($_POST['_csrf'] ?? null)
++                ||
++                !hash_equals($csrf, $_POST['_csrf'])
++            ) {
++                http_response_code(403);
++                exit('Formulário inválido.');
++            }
++
++            $dados = $_POST;
++
++            $valoresAtuais = is_array(
++                $_POST['values'] ?? null
++            ) ? $_POST['values'] : [];
++
++            try {
++
++                // BLOQUEAR EDIÇÃO COM PAGAMENTOS
++                if ($bloqueada) {
++
++                    throw new InvalidArgumentException(
++                        'Esta despesa possui pagamentos e não pode ser editada.'
++                    );
++                }
++
++                // MORADORES SELECIONADOS
++                $lista = $_POST['members'] ?? [];
++
++                if (!is_array($lista)) {
++                    throw new InvalidArgumentException(
++                        'Moradores inválidos.'
++                    );
++                }
++
++                $selecionados = array_values(
++                    array_unique(
++                        array_map('intval', $lista)
++                    )
++                );
++
++                // DADOS DA DESPESA
++                $titulo = trim(
++                    (string) ($_POST['title'] ?? '')
++                );
++
++                $descricao = trim(
++                    (string) ($_POST['description'] ?? '')
++                );
++
++                $categoria = (int) (
++                    $_POST['category_id'] ?? 0
++                );
++
++                $valorTexto = (string) (
++                    $_POST['total_amount'] ?? ''
++                );
++
++                $data = (string) (
++                    $_POST['expense_date'] ?? ''
++                );
++
++                $vencimento = (string) (
++                    $_POST['due_date'] ?? ''
++                );
++
++                $tipo = (string) (
++                    $_POST['split_type'] ?? 'equal'
++                );
++
++                // VALIDAR NOME
++                $tamanho = preg_match_all(
++                    '/./us',
++                    $titulo
++                );
++
++                if (
++                    $tamanho === false ||
++                    $tamanho < 2 ||
++                    $tamanho > 150
++                ) {
++                    throw new InvalidArgumentException(
++                        'Informe um nome de 2 a 150 caracteres.'
++                    );
++                }
++
++                if (strlen($descricao) > 5000) {
++                    throw new InvalidArgumentException(
++                        'Descrição muito longa.'
++                    );
++                }
++
++                // CONVERTER VALOR
++                $centavos = ExpenseRateio::centavos(
++                    $valorTexto
++                );
++
++                if ($centavos <= 0) {
++                    throw new InvalidArgumentException(
++                        'O valor deve ser maior que zero.'
++                    );
++                }
++
++                // VALIDAR CATEGORIA
++                $categoriasValidas = array_map(
++                    'intval',
++                    array_column($categorias, 'id')
++                );
++
++                if (!in_array(
++                    $categoria,
++                    $categoriasValidas,
++                    true
++                )) {
++                    throw new InvalidArgumentException(
++                        'Escolha uma categoria válida.'
++                    );
++                }
++
++                // VALIDAR DATAS
++                foreach (
++                    [$data, $vencimento]
++                    as $indice => $campo
++                ) {
++
++                    if ($indice === 1 && $campo === '') {
++                        continue;
++                    }
++
++                    if (!preg_match(
++                        '/^\d{4}-\d{2}-\d{2}$/D',
++                        $campo
++                    )) {
++                        throw new InvalidArgumentException(
++                            'Informe datas válidas.'
++                        );
++                    }
++
++                    [$ano, $mes, $dia] = array_map(
++                        'intval',
++                        explode('-', $campo)
++                    );
++
++                    if (!checkdate($mes, $dia, $ano)) {
++                        throw new InvalidArgumentException(
++                            'Informe datas válidas.'
++                        );
++                    }
++                }
++
++                // VALIDAR MORADORES
++                $permitidos = array_map(
++                    'intval',
++                    array_column($moradores, 'id')
++                );
++
++                if (
++                    !$selecionados ||
++                    array_diff($selecionados, $permitidos)
++                ) {
++                    throw new InvalidArgumentException(
++                        'Selecione moradores válidos.'
++                    );
++                }
++
++                // VALIDAR TIPO DE RATEIO
++                if (!in_array(
++                    $tipo,
++                    ['equal', 'percentage', 'custom'],
++                    true
++                )) {
++                    throw new InvalidArgumentException(
++                        'Tipo de rateio inválido.'
++                    );
++                }
++
++                // VALIDAR VALORES DOS MORADORES
++                if ($tipo !== 'equal') {
++
++                    foreach ($selecionados as $moradorId) {
++
++                        if (
++                            !isset($valoresAtuais[$moradorId])
++                            ||
++                            !is_scalar(
++                                $valoresAtuais[$moradorId]
++                            )
++                        ) {
++                            throw new InvalidArgumentException(
++                                'Preencha os valores do rateio.'
++                            );
++                        }
++                    }
++                }
++
++                // RECALCULAR RATEIO
++                $partes = ExpenseRateio::calcular(
++                    $tipo,
++                    $centavos,
++                    $selecionados,
++                    $valoresAtuais
++                );
++
++                // INICIAR TRANSAÇÃO
++                $db->beginTransaction();
++
++                // BLOQUEAR A DESPESA DURANTE A EDIÇÃO
++                $consulta = $db->prepare(
++                    'SELECT id
++                     FROM expenses
++                     WHERE id = :id
++                       AND republic_id = :republica
++                     FOR UPDATE'
++                );
++
++                $consulta->execute([
++                    'id' => $id,
++                    'republica' =>
++                        (int) $despesa['republic_id']
++                ]);
++
++                if (!$consulta->fetchColumn()) {
++                    throw new InvalidArgumentException(
++                        'Despesa não encontrada.'
++                    );
++                }
++
++                // CONFERIR AS PARTES DO RATEIO
++                $consulta = $db->prepare(
++                    'SELECT id, status
++                     FROM expense_shares
++                     WHERE expense_id = :id
++                     FOR UPDATE'
++                );
++
++                $consulta->execute(['id' => $id]);
++
++                $partesBloqueadas = $consulta->fetchAll(
++                    PDO::FETCH_ASSOC
++                );
++
++                foreach ($partesBloqueadas as $parte) {
++
++                    if ($parte['status'] === 'paid') {
++                        throw new InvalidArgumentException(
++                            'Não é possível editar uma despesa com pagamentos.'
++                        );
++                    }
++                }
++
++                // CONFERIR PAGAMENTOS NOVAMENTE
++                $consulta = $db->prepare(
++                    'SELECT COUNT(*)
++                     FROM payments p
++                     JOIN expense_shares s
++                       ON s.id = p.expense_share_id
++                     WHERE s.expense_id = :id'
++                );
++
++                $consulta->execute(['id' => $id]);
++
++                if (
++                    (int) $consulta->fetchColumn() > 0
++                ) {
++                    throw new InvalidArgumentException(
++                        'Não é possível editar uma despesa com pagamentos.'
++                    );
++                }
++
++                // ATUALIZAR A DESPESA
++                $consulta = $db->prepare(
++                    'UPDATE expenses
++                     SET title = :titulo,
++                         description = :descricao,
++                         category_id = :categoria,
++                         total_amount = :valor,
++                         expense_date = :data,
++                         due_date = :vencimento,
++                         split_type = :tipo
++                     WHERE id = :id'
++                );
++
++                $consulta->execute([
++                    'titulo' => $titulo,
++                    'descricao' => $descricao,
++                    'categoria' => $categoria,
++
++                    'valor' => number_format(
++                        $centavos / 100,
++                        2,
++                        '.',
++                        ''
++                    ),
++
++                    'data' => $data,
++
++                    'vencimento' => $vencimento !== ''
++                        ? $vencimento
++                        : null,
++
++                    'tipo' => $tipo,
++                    'id' => $id
++                ]);
++
++                // REMOVER RATEIO ANTERIOR
++                $consulta = $db->prepare(
++                    'DELETE FROM expense_shares
++                     WHERE expense_id = :id'
++                );
++
++                $consulta->execute(['id' => $id]);
++
++                // SALVAR NOVO RATEIO
++                $inserir = $db->prepare(
++                    'INSERT INTO expense_shares
++                    (
++                        expense_id,
++                        member_id,
++                        amount_due,
++                        percentage
++                    )
++                    VALUES
++                    (
++                        :despesa,
++                        :morador,
++                        :valor,
++                        :percentual
++                    )'
++                );
++
++                foreach ($partes as $moradorId => $parte) {
++
++                    $inserir->execute([
++                        'despesa' => $id,
++                        'morador' => (int) $moradorId,
++
++                        'valor' => number_format(
++                            $parte['centavos'] / 100,
++                            2,
++                            '.',
++                            ''
++                        ),
++
++                        'percentual' =>
++                            $parte['percentual']
++                    ]);
++                }
++
++                // CONFIRMAR ALTERAÇÕES
++                $db->commit();
++
++                header(
++                    'Location: /despesas',
++                    true,
++                    303
++                );
++
++                exit;
++
++            } catch (InvalidArgumentException $erro) {
++
++                if ($db->inTransaction()) {
++                    $db->rollBack();
++                }
++
++                $erros[] = $erro->getMessage();
++
++            } catch (Throwable $erro) {
++
++                if ($db->inTransaction()) {
++                    $db->rollBack();
++                }
++
++                error_log((string) $erro);
++
++                $erros[] =
++                    'Não foi possível atualizar a despesa.';
++            }
++        }
++
++        // ABRIR O FORMULÁRIO DE EDIÇÃO
++        require dirname(__DIR__)
++            . '/Views/expenses/edit.php';
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Controllers/ExpensePaymentController.php /mnt/data/integracao_rep/stage2/app/Controllers/ExpensePaymentController.php
+--- /mnt/data/integracao_rep/base/app/Controllers/ExpensePaymentController.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Controllers/ExpensePaymentController.php	2026-11-15 01:33:25.034670314 +0000
+@@ -0,0 +1,655 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Core\Database;
++use App\Core\Session;
++use App\Services\ExpenseRateio;
++use InvalidArgumentException;
++use PDO;
++use Throwable;
++
++final class ExpensePaymentController
++{
++    private function usuarioId(): int
++    {
++        $usuario = Session::get('user');
++
++        if (!is_array($usuario) || empty($usuario['id'])) {
++            header('Location: /login');
++            exit;
++        }
++
++        return (int) $usuario['id'];
++    }
++
++    private function validarToken(): void
++    {
++        $esperado = Session::get('csrf_despesas');
++        $recebido = $_POST['_csrf'] ?? null;
++
++        if (
++            !is_string($esperado) ||
++            !is_string($recebido) ||
++            !hash_equals($esperado, $recebido)
++        ) {
++            http_response_code(403);
++            exit(
++                'Formulário inválido. Atualize a página e tente novamente.'
++            );
++        }
++    }
++
++    private function erro(
++        string $mensagem,
++        int $codigo = 422
++    ): void {
++        http_response_code($codigo);
++
++        echo '<!doctype html>';
++        echo '<html lang="pt-BR">';
++        echo '<meta charset="UTF-8">';
++        echo '<title>Pagamento</title>';
++
++        echo '<body style="font-family:Arial;padding:30px">';
++        echo '<h2>Não foi possível concluir a operação</h2>';
++
++        echo '<p>';
++        echo htmlspecialchars(
++            $mensagem,
++            ENT_QUOTES,
++            'UTF-8'
++        );
++        echo '</p>';
++
++        echo '<p><a href="/despesas">';
++        echo 'Voltar às despesas';
++        echo '</a></p></body></html>';
++
++        exit;
++    }
++
++    // REGISTRAR PAGAMENTO
++    public function store(): void
++    {
++        $usuarioId = $this->usuarioId();
++        $this->validarToken();
++
++        $shareId = filter_var(
++            $_POST['share_id'] ?? null,
++            FILTER_VALIDATE_INT
++        );
++
++        if (!$shareId || $shareId < 1) {
++            $this->erro('Selecione um morador válido.');
++        }
++
++        try {
++            $centavos = ExpenseRateio::centavos(
++                (string) ($_POST['amount'] ?? '')
++            );
++
++            if ($centavos < 1) {
++                throw new InvalidArgumentException(
++                    'O pagamento deve ser maior que zero.'
++                );
++            }
++        } catch (InvalidArgumentException $erro) {
++            $this->erro($erro->getMessage());
++        }
++
++        $db = Database::connection();
++
++        $comprovante = null;
++        $arquivoFisico = null;
++
++        try {
++            $db->beginTransaction();
++
++            // Verifica se o usuário pode registrar
++            // pagamento nesta parte da despesa.
++            $consulta = $db->prepare(
++                "SELECT
++                    s.id,
++                    s.expense_id,
++                    s.amount_due,
++                    s.status,
++                    e.republic_id,
++                    rm.role
++                 FROM expense_shares s
++                 JOIN expenses e
++                    ON e.id = s.expense_id
++                 JOIN republics r
++                    ON r.id = e.republic_id
++                 JOIN republic_members rm
++                    ON rm.republic_id = e.republic_id
++                 WHERE s.id = :parte
++                   AND rm.user_id = :usuario
++                   AND rm.active = 1
++                   AND r.active = 1
++                   AND (
++                       rm.role = 'admin'
++                       OR rm.id = s.member_id
++                   )
++                 LIMIT 1"
++            );
++
++            $consulta->execute([
++                'parte' => $shareId,
++                'usuario' => $usuarioId
++            ]);
++
++            $parte = $consulta->fetch(PDO::FETCH_ASSOC);
++
++            if (!$parte) {
++                throw new InvalidArgumentException(
++                    'Você não pode registrar este pagamento.'
++                );
++            }
++
++            // Protege a despesa durante o pagamento.
++            $trava = $db->prepare(
++                'SELECT id
++                 FROM expenses
++                 WHERE id = :id
++                 FOR UPDATE'
++            );
++
++            $trava->execute([
++                'id' => (int) $parte['expense_id']
++            ]);
++
++            $trava->fetchColumn();
++
++            $trava = $db->prepare(
++                'SELECT amount_due, status
++                 FROM expense_shares
++                 WHERE id = :id
++                 FOR UPDATE'
++            );
++
++            $trava->execute(['id' => $shareId]);
++
++            $parteAtual = $trava->fetch(PDO::FETCH_ASSOC);
++
++            if (
++                !$parteAtual ||
++                $parteAtual['status'] === 'paid'
++            ) {
++                throw new InvalidArgumentException(
++                    'Esta parte já está paga ou não existe.'
++                );
++            }
++
++            // Soma pagamentos pendentes e confirmados.
++            $consulta = $db->prepare(
++                "SELECT COALESCE(SUM(amount), 0)
++                 FROM payments
++                 WHERE expense_share_id = :id
++                   AND status IN (
++                       'pending',
++                       'confirmed'
++                   )"
++            );
++
++            $consulta->execute(['id' => $shareId]);
++
++            $comprometidos = ExpenseRateio::centavos(
++                (string) $consulta->fetchColumn()
++            );
++
++            $devido = ExpenseRateio::centavos(
++                (string) $parteAtual['amount_due']
++            );
++
++            $disponivel = $devido - $comprometidos;
++
++            if ($centavos > $disponivel) {
++                throw new InvalidArgumentException(
++                    'O valor excede o saldo disponível, considerando pagamentos pendentes.'
++                );
++            }
++
++            // COMPROVANTE OPCIONAL
++            if (isset($_FILES['proof'])) {
++                $upload = $_FILES['proof'];
++
++                if (
++                    !is_array($upload) ||
++                    is_array($upload['error'] ?? null)
++                ) {
++                    throw new InvalidArgumentException(
++                        'Arquivo de comprovante inválido.'
++                    );
++                }
++
++                if ($upload['error'] !== UPLOAD_ERR_NO_FILE) {
++
++                    if ($upload['error'] !== UPLOAD_ERR_OK) {
++                        throw new InvalidArgumentException(
++                            'Falha ao enviar o comprovante.'
++                        );
++                    }
++
++                    if (
++                        ($upload['size'] ?? 0) < 1 ||
++                        $upload['size'] > 5 * 1024 * 1024
++                    ) {
++                        throw new InvalidArgumentException(
++                            'O comprovante deve ter até 5 MB.'
++                        );
++                    }
++
++                    $temporario = (string) (
++                        $upload['tmp_name'] ?? ''
++                    );
++
++                    if (!is_uploaded_file($temporario)) {
++                        throw new InvalidArgumentException(
++                            'Comprovante inválido.'
++                        );
++                    }
++
++                    // Somente PDF, JPG e PNG.
++                    $tipos = [
++                        'application/pdf' => 'pdf',
++                        'image/jpeg' => 'jpg',
++                        'image/png' => 'png'
++                    ];
++
++                    $detector = new \finfo(
++                        FILEINFO_MIME_TYPE
++                    );
++
++                    $mime = $detector->file($temporario);
++
++                    if (!isset($tipos[$mime])) {
++                        throw new InvalidArgumentException(
++                            'Envie um PDF, JPG ou PNG.'
++                        );
++                    }
++
++                    // Pasta fora da área pública do site.
++                    $pasta = dirname(__DIR__, 2)
++                        . '/storage/payment-proofs';
++
++                    if (
++                        !is_dir($pasta) &&
++                        !mkdir($pasta, 0750, true) &&
++                        !is_dir($pasta)
++                    ) {
++                        throw new InvalidArgumentException(
++                            'Não foi possível criar a pasta de comprovantes.'
++                        );
++                    }
++
++                    $nome = bin2hex(random_bytes(16))
++                        . '.'
++                        . $tipos[$mime];
++
++                    $arquivoFisico = $pasta
++                        . '/'
++                        . $nome;
++
++                    if (!move_uploaded_file(
++                        $temporario,
++                        $arquivoFisico
++                    )) {
++                        throw new InvalidArgumentException(
++                            'Não foi possível salvar o comprovante.'
++                        );
++                    }
++
++                    $comprovante = $nome;
++                }
++            }
++
++            // REGISTRAR NO MYSQL
++            $consulta = $db->prepare(
++                "INSERT INTO payments
++                    (
++                        expense_share_id,
++                        amount,
++                        proof_path,
++                        status
++                    )
++                 VALUES
++                    (
++                        :parte,
++                        :valor,
++                        :comprovante,
++                        'pending'
++                    )"
++            );
++
++            $consulta->execute([
++                'parte' => $shareId,
++
++                'valor' => number_format(
++                    $centavos / 100,
++                    2,
++                    '.',
++                    ''
++                ),
++
++                'comprovante' => $comprovante
++            ]);
++
++            $db->commit();
++
++            header(
++                'Location: /despesas/detalhes?id='
++                . (int) $parte['expense_id']
++                . '&pagamento=registrado',
++                true,
++                303
++            );
++
++            exit;
++
++        } catch (Throwable $erro) {
++
++            if ($db->inTransaction()) {
++                $db->rollBack();
++            }
++
++            if (
++                $arquivoFisico !== null &&
++                is_file($arquivoFisico)
++            ) {
++                unlink($arquivoFisico);
++            }
++
++            if ($erro instanceof InvalidArgumentException) {
++                $this->erro($erro->getMessage());
++            }
++
++            error_log((string) $erro);
++
++            $this->erro(
++                'Erro interno ao registrar pagamento.',
++                500
++            );
++        }
++    }
++
++    // CONFIRMAR PAGAMENTO
++    public function confirm(): void
++    {
++        $usuarioId = $this->usuarioId();
++        $this->validarToken();
++
++        $paymentId = filter_var(
++            $_POST['payment_id'] ?? null,
++            FILTER_VALIDATE_INT
++        );
++
++        if (!$paymentId || $paymentId < 1) {
++            $this->erro('Pagamento inválido.');
++        }
++
++        $db = Database::connection();
++
++        try {
++            $db->beginTransaction();
++
++            // Somente administrador da república.
++            $consulta = $db->prepare(
++                "SELECT
++                    p.id,
++                    p.expense_share_id,
++                    s.expense_id
++                 FROM payments p
++                 JOIN expense_shares s
++                    ON s.id = p.expense_share_id
++                 JOIN expenses e
++                    ON e.id = s.expense_id
++                 JOIN republics r
++                    ON r.id = e.republic_id
++                 JOIN republic_members rm
++                    ON rm.republic_id = e.republic_id
++                 WHERE p.id = :pagamento
++                   AND rm.user_id = :usuario
++                   AND rm.active = 1
++                   AND rm.role = 'admin'
++                   AND r.active = 1
++                 LIMIT 1"
++            );
++
++            $consulta->execute([
++                'pagamento' => $paymentId,
++                'usuario' => $usuarioId
++            ]);
++
++            $alvo = $consulta->fetch(PDO::FETCH_ASSOC);
++
++            if (!$alvo) {
++                throw new InvalidArgumentException(
++                    'Somente um administrador pode confirmar este pagamento.'
++                );
++            }
++
++            $trava = $db->prepare(
++                'SELECT id
++                 FROM expenses
++                 WHERE id = :id
++                 FOR UPDATE'
++            );
++
++            $trava->execute([
++                'id' => (int) $alvo['expense_id']
++            ]);
++
++            $trava->fetchColumn();
++
++            $trava = $db->prepare(
++                'SELECT amount_due
++                 FROM expense_shares
++                 WHERE id = :id
++                 FOR UPDATE'
++            );
++
++            $trava->execute([
++                'id' => (int) $alvo['expense_share_id']
++            ]);
++
++            $devidoTexto = $trava->fetchColumn();
++
++            if ($devidoTexto === false) {
++                throw new InvalidArgumentException(
++                    'Parte da despesa não encontrada.'
++                );
++            }
++
++            // Verifica se ainda está pendente.
++            $consulta = $db->prepare(
++                'SELECT status
++                 FROM payments
++                 WHERE id = :id
++                 FOR UPDATE'
++            );
++
++            $consulta->execute(['id' => $paymentId]);
++
++            if ($consulta->fetchColumn() !== 'pending') {
++                throw new InvalidArgumentException(
++                    'Este pagamento não está aguardando confirmação.'
++                );
++            }
++
++            // Confirma o pagamento.
++            $consulta = $db->prepare(
++                "UPDATE payments
++                 SET status = 'confirmed'
++                 WHERE id = :id"
++            );
++
++            $consulta->execute(['id' => $paymentId]);
++
++            // Calcula o total confirmado.
++            $consulta = $db->prepare(
++                "SELECT COALESCE(SUM(amount), 0)
++                 FROM payments
++                 WHERE expense_share_id = :parte
++                   AND status = 'confirmed'"
++            );
++
++            $consulta->execute([
++                'parte' => (int) $alvo['expense_share_id']
++            ]);
++
++            $totalPago = ExpenseRateio::centavos(
++                (string) $consulta->fetchColumn()
++            );
++
++            $valorDevido = ExpenseRateio::centavos(
++                (string) $devidoTexto
++            );
++
++            // Marca o rateio como pago quando quitado.
++            if ($totalPago >= $valorDevido) {
++                $consulta = $db->prepare(
++                    "UPDATE expense_shares
++                     SET status = 'paid',
++                         paid_at = NOW()
++                     WHERE id = :id"
++                );
++
++                $consulta->execute([
++                    'id' => (int) $alvo['expense_share_id']
++                ]);
++            }
++
++            $db->commit();
++
++            header(
++                'Location: /despesas/detalhes?id='
++                . (int) $alvo['expense_id']
++                . '&pagamento=confirmado',
++                true,
++                303
++            );
++
++            exit;
++
++        } catch (Throwable $erro) {
++
++            if ($db->inTransaction()) {
++                $db->rollBack();
++            }
++
++            if ($erro instanceof InvalidArgumentException) {
++                $this->erro($erro->getMessage());
++            }
++
++            error_log((string) $erro);
++
++            $this->erro(
++                'Erro interno ao confirmar pagamento.',
++                500
++            );
++        }
++    }
++
++    // BAIXAR COMPROVANTE COM PERMISSÃO
++    public function proof(): void
++    {
++        $usuarioId = $this->usuarioId();
++
++        $paymentId = filter_input(
++            INPUT_GET,
++            'id',
++            FILTER_VALIDATE_INT
++        );
++
++        if (!$paymentId || $paymentId < 1) {
++            $this->erro(
++                'Comprovante não encontrado.',
++                404
++            );
++        }
++
++        $db = Database::connection();
++
++        $consulta = $db->prepare(
++            'SELECT p.proof_path
++             FROM payments p
++
++             JOIN expense_shares s
++                ON s.id = p.expense_share_id
++
++             JOIN expenses e
++                ON e.id = s.expense_id
++
++             JOIN republics r
++                ON r.id = e.republic_id
++
++             JOIN republic_members rm
++                ON rm.republic_id = e.republic_id
++
++             WHERE p.id = :pagamento
++               AND rm.user_id = :usuario
++               AND rm.active = 1
++               AND r.active = 1
++
++             LIMIT 1'
++        );
++
++        $consulta->execute([
++            'pagamento' => $paymentId,
++            'usuario' => $usuarioId
++        ]);
++
++        $nome = $consulta->fetchColumn();
++
++        if (
++            !$nome ||
++            !preg_match(
++                '/^[a-f0-9]{32}\.(pdf|jpg|png)$/D',
++                (string) $nome
++            )
++        ) {
++            $this->erro(
++                'Comprovante não encontrado.',
++                404
++            );
++        }
++
++        $arquivo = dirname(__DIR__, 2)
++            . '/storage/payment-proofs/'
++            . $nome;
++
++        if (!is_file($arquivo)) {
++            $this->erro(
++                'Arquivo de comprovante indisponível.',
++                404
++            );
++        }
++
++        $extensao = pathinfo(
++            $nome,
++            PATHINFO_EXTENSION
++        );
++
++        $tipos = [
++            'pdf' => 'application/pdf',
++            'jpg' => 'image/jpeg',
++            'png' => 'image/png'
++        ];
++
++        header('Content-Type: ' . $tipos[$extensao]);
++        header('X-Content-Type-Options: nosniff');
++
++        header(
++            'Content-Disposition: attachment; filename="comprovante.'
++            . $extensao
++            . '"'
++        );
++
++        header('Cache-Control: private, no-store');
++        header('Content-Length: ' . filesize($arquivo));
++
++        readfile($arquivo);
++        exit;
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Services/ExpenseRateio.php /mnt/data/integracao_rep/stage2/app/Services/ExpenseRateio.php
+--- /mnt/data/integracao_rep/base/app/Services/ExpenseRateio.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Services/ExpenseRateio.php	2026-11-15 01:33:25.037144859 +0000
+@@ -0,0 +1,187 @@
++<?php
++
++namespace App\Services;
++
++use InvalidArgumentException;
++
++final class ExpenseRateio
++{
++    // Converte reais para centavos
++    public static function centavos(string $texto): int
++    {
++        $texto = str_replace(',', '.', trim($texto));
++
++        if (!preg_match('/^\d{1,8}(?:\.\d{1,2})?$/D', $texto)) {
++            throw new InvalidArgumentException(
++                'Informe um valor válido. Ex.: 300.00'
++            );
++        }
++
++        [$inteiro, $decimais] = array_pad(
++            explode('.', $texto, 2), 2, '0'
++        );
++
++        return (int) $inteiro * 100
++            + (int) str_pad($decimais, 2, '0');
++    }
++
++    // Calcula o rateio escolhido
++    public static function calcular(
++        string $tipo,
++        int $totalCentavos,
++        array $moradores,
++        array $valores = []
++    ): array {
++
++        $moradores = array_values(
++            array_unique(array_map('intval', $moradores))
++        );
++
++        $quantidade = count($moradores);
++
++        if (
++            $totalCentavos <= 0 ||
++            $quantidade === 0 ||
++            count(array_filter($moradores, fn($id) => $id <= 0)) > 0
++        ) {
++            throw new InvalidArgumentException(
++                'Informe valor e moradores válidos.'
++            );
++        }
++
++        $partes = [];
++
++        // RATEIO IGUALITÁRIO
++        if ($tipo === 'equal') {
++
++            $base = intdiv($totalCentavos, $quantidade);
++            $resto = $totalCentavos % $quantidade;
++
++            foreach ($moradores as $indice => $id) {
++                $partes[$id] = [
++                    'centavos' => $base + (
++                        $indice < $resto ? 1 : 0
++                    ),
++                    'percentual' => null
++                ];
++            }
++
++        // RATEIO PERSONALIZADO
++        } elseif ($tipo === 'custom') {
++
++            $soma = 0;
++
++            foreach ($moradores as $id) {
++
++                $centavos = self::centavos(
++                    (string) ($valores[$id] ?? '')
++                );
++
++                $soma += $centavos;
++
++                $partes[$id] = [
++                    'centavos' => $centavos,
++                    'percentual' => null
++                ];
++            }
++
++            if ($soma !== $totalCentavos) {
++                throw new InvalidArgumentException(
++                    'Os valores devem somar o total da despesa.'
++                );
++            }
++
++        // RATEIO PERCENTUAL
++        } elseif ($tipo === 'percentage') {
++
++            $somaPercentual = 0;
++            $somaCentavos = 0;
++            $restos = [];
++
++            foreach ($moradores as $id) {
++
++                $texto = str_replace(
++                    ',',
++                    '.',
++                    trim((string) ($valores[$id] ?? ''))
++                );
++
++                if (!preg_match(
++                    '/^\d{1,3}(?:\.\d{1,2})?$/D',
++                    $texto
++                )) {
++                    throw new InvalidArgumentException(
++                        'Informe percentuais com até 2 casas decimais.'
++                    );
++                }
++
++                [$inteiro, $decimal] = array_pad(
++                    explode('.', $texto, 2),
++                    2,
++                    '0'
++                );
++
++                $percentual = (int) $inteiro * 100
++                    + (int) str_pad($decimal, 2, '0');
++
++                if ($percentual > 10000) {
++                    throw new InvalidArgumentException(
++                        'Percentual maior que 100%.'
++                    );
++                }
++
++                $produto = $totalCentavos * $percentual;
++                $centavos = intdiv($produto, 10000);
++
++                $partes[$id] = [
++                    'centavos' => $centavos,
++                    'percentual' => number_format(
++                        $percentual / 100, 2, '.', ''
++                    )
++                ];
++
++                $restos[$id] = $produto % 10000;
++
++                $somaCentavos += $centavos;
++                $somaPercentual += $percentual;
++            }
++
++            if ($somaPercentual !== 10000) {
++                throw new InvalidArgumentException(
++                    'A soma dos percentuais deve ser 100%.'
++                );
++            }
++
++            // Distribui centavos restantes
++            arsort($restos, SORT_NUMERIC);
++
++            $faltam = $totalCentavos - $somaCentavos;
++
++            foreach (array_keys($restos) as $id) {
++                if ($faltam <= 0) {
++                    break;
++                }
++
++                $partes[$id]['centavos']++;
++                $faltam--;
++            }
++
++        } else {
++
++            throw new InvalidArgumentException(
++                'Tipo de rateio inválido.'
++            );
++        }
++
++        // Verifica se todos recebem um valor positivo
++        foreach ($partes as $parte) {
++            if ($parte['centavos'] < 1) {
++                throw new InvalidArgumentException(
++                    'Cada morador deve pagar pelo menos R$ 0,01.'
++                );
++            }
++        }
++
++        return $partes;
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Views/expenses/create.php /mnt/data/integracao_rep/stage2/app/Views/expenses/create.php
+--- /mnt/data/integracao_rep/base/app/Views/expenses/create.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Views/expenses/create.php	2026-11-15 01:33:25.040506982 +0000
+@@ -0,0 +1,943 @@
++
++<?php
++
++$pageTitle = 'Nova despesa - RepubliCAIXA';
++$currentPage = 'expenses';
++
++// Protege os textos exibidos no HTML
++$esc = static function ($valor): string {
++    return htmlspecialchars(
++        (string) ($valor ?? ''),
++        ENT_QUOTES,
++        'UTF-8'
++    );
++};
++
++// Dados recebidos do controller
++$dados = $dados ?? [];
++$erros = $erros ?? [];
++$categorias = $categorias ?? [];
++$moradores = $moradores ?? [];
++$selecionados = $selecionados ?? [];
++
++$tipoAtual = $dados['split_type'] ?? 'equal';
++
++if (!in_array(
++    $tipoAtual,
++    ['equal', 'percentage', 'custom'],
++    true
++)) {
++    $tipoAtual = 'equal';
++}
++
++$valoresAtuais = is_array($dados['values'] ?? null)
++    ? $dados['values']
++    : [];
++
++require __DIR__ . '/../partials/header.php';
++
++?>
++
++<style>
++    .expense-create {
++        max-width: 1050px;
++    }
++
++    .expense-create-header {
++        display: flex;
++        justify-content: space-between;
++        align-items: center;
++        flex-wrap: wrap;
++        gap: 15px;
++    }
++
++    .expense-create-card {
++        margin-top: 22px;
++    }
++
++    .expense-create-card h2 {
++        margin-bottom: 20px;
++    }
++
++    .expense-create-grid {
++        display: grid;
++        grid-template-columns: repeat(2, minmax(0, 1fr));
++        gap: 18px;
++    }
++
++    .expense-create-field {
++        display: flex;
++        flex-direction: column;
++        gap: 7px;
++    }
++
++    .expense-create-field.full {
++        grid-column: 1 / -1;
++    }
++
++    .expense-create-field label {
++        font-weight: 600;
++    }
++
++    .expense-create-field input,
++    .expense-create-field select,
++    .expense-create-field textarea {
++        width: 100%;
++        padding: 12px;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        background: white;
++        color: #1e293b;
++        font: inherit;
++    }
++
++    /* Área do rateio */
++    .rateio-type {
++        margin: 20px 0;
++    }
++
++    .rateio-type label {
++        display: block;
++        margin-bottom: 8px;
++        font-weight: 600;
++    }
++
++    .rateio-type select {
++        width: 100%;
++        padding: 12px;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        background: white;
++        font: inherit;
++    }
++
++    .expense-create-member {
++        display: flex;
++        align-items: center;
++        flex-wrap: wrap;
++        gap: 12px;
++        padding: 12px;
++        border-bottom: 1px solid #e2e8f0;
++    }
++
++    .expense-participant {
++        width: 18px;
++        height: 18px;
++    }
++
++    .member-name {
++        flex: 1;
++        min-width: 140px;
++    }
++
++    .member-value {
++        width: 160px;
++        padding: 10px;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        font: inherit;
++    }
++
++    .member-result {
++        min-width: 110px;
++        text-align: right;
++        color: #0f766e;
++        font-weight: 600;
++    }
++
++    .rateio-message {
++        margin-top: 16px;
++        font-weight: 600;
++        color: #0f766e;
++    }
++
++    .rateio-message.error {
++        color: #dc2626;
++    }
++
++    .rateio-note {
++        margin-top: 12px;
++        color: #64748b;
++        font-size: 14px;
++    }
++
++    /* Botões */
++    .expense-create-actions {
++        display: flex;
++        align-items: center;
++        gap: 16px;
++        margin-top: 24px;
++    }
++
++    .expense-create-primary {
++        background: #0f766e;
++        border: 0;
++        color: white;
++        border-radius: 8px;
++        padding: 12px 20px;
++        font-weight: 600;
++        cursor: pointer;
++    }
++
++    .expense-create-primary:hover {
++        background: #115e59;
++    }
++
++    .expense-create-primary:disabled {
++        background: #94a3b8;
++        opacity: 0.7;
++        cursor: not-allowed;
++    }
++
++    .expense-create-secondary {
++        color: #0f766e;
++        font-weight: 600;
++        text-decoration: none;
++    }
++
++    .expense-create-notice {
++        background: #fff1f2;
++        color: #9f1239;
++        padding: 12px 16px;
++        border-radius: 8px;
++        margin-top: 18px;
++    }
++
++    @media (max-width: 650px) {
++        .expense-create-grid {
++            grid-template-columns: 1fr;
++        }
++
++        .member-result {
++            text-align: left;
++        }
++    }
++</style>
++
++<div class="app-layout">
++
++    <!-- MENU LATERAL -->
++    <?php require __DIR__ . '/../partials/sidebar.php'; ?>
++
++    <main class="main-content expense-create">
++
++        <!-- CABEÇALHO -->
++        <div class="page-header expense-create-header">
++
++            <div>
++                <h1>Nova despesa</h1>
++
++                <p class="text-muted">
++                    Cadastre uma conta e divida entre os moradores.
++                </p>
++            </div>
++
++            <a
++                href="/despesas"
++                class="expense-create-secondary"
++            >
++                Voltar para despesas
++            </a>
++
++        </div>
++
++        <!-- MENSAGENS DE ERRO DO PHP -->
++        <?php foreach ($erros as $erro): ?>
++
++            <div class="expense-create-notice" role="alert">
++                <?= $esc($erro) ?>
++            </div>
++
++        <?php endforeach; ?>
++
++        <!-- FORMULÁRIO DE CADASTRO -->
++        <form
++            action="/despesas/nova"
++            method="post"
++            id="expenseForm"
++        >
++
++            <input
++                type="hidden"
++                name="_csrf"
++                value="<?= $esc($csrf) ?>"
++            >
++
++            <!-- INFORMAÇÕES DA DESPESA -->
++            <section class="card expense-create-card">
++
++                <h2>Informações da despesa</h2>
++
++                <div class="expense-create-grid">
++
++                    <!-- Nome -->
++                    <div class="expense-create-field full">
++
++                        <label for="expense-title">
++                            Nome da despesa *
++                        </label>
++
++                        <input
++                            id="expense-title"
++                            name="title"
++                            maxlength="150"
++                            required
++                            placeholder="Ex.: Conta de energia"
++                            value="<?= $esc($dados['title'] ?? '') ?>"
++                        >
++
++                    </div>
++
++                    <!-- Categoria -->
++                    <div class="expense-create-field">
++
++                        <label for="expense-category">
++                            Categoria *
++                        </label>
++
++                        <select
++                            id="expense-category"
++                            name="category_id"
++                            required
++                        >
++
++                            <option value="">
++                                Selecione...
++                            </option>
++
++                            <?php foreach ($categorias as $categoria): ?>
++
++                                <option
++                                    value="<?= (int) $categoria['id'] ?>"
++                                    <?= (string) ($dados['category_id'] ?? '') === (string) $categoria['id'] ? 'selected' : '' ?>
++                                >
++                                    <?= $esc($categoria['name']) ?>
++                                </option>
++
++                            <?php endforeach; ?>
++
++                        </select>
++
++                    </div>
++
++                    <!-- Valor total -->
++                    <div class="expense-create-field">
++
++                        <label for="expense-total">
++                            Valor total (R$) *
++                        </label>
++
++                        <input
++                            id="expense-total"
++                            type="number"
++                            name="total_amount"
++                            step="0.01"
++                            min="0.01"
++                            max="99999999.99"
++                            required
++                            placeholder="300.00"
++                            value="<?= $esc($dados['total_amount'] ?? '') ?>"
++                        >
++
++                    </div>
++
++                    <!-- Data -->
++                    <div class="expense-create-field">
++
++                        <label for="expense-date">
++                            Data da despesa *
++                        </label>
++
++                        <input
++                            id="expense-date"
++                            type="date"
++                            name="expense_date"
++                            required
++                            value="<?= $esc($dados['expense_date'] ?? date('Y-m-d')) ?>"
++                        >
++
++                    </div>
++
++                    <!-- Vencimento -->
++                    <div class="expense-create-field">
++
++                        <label for="expense-due">
++                            Vencimento
++                        </label>
++
++                        <input
++                            id="expense-due"
++                            type="date"
++                            name="due_date"
++                            value="<?= $esc($dados['due_date'] ?? '') ?>"
++                        >
++
++                    </div>
++
++                    <!-- Descrição -->
++                    <div class="expense-create-field full">
++
++                        <label for="expense-description">
++                            Descrição (opcional)
++                        </label>
++
++                        <textarea
++                            id="expense-description"
++                            name="description"
++                            rows="3"
++                            placeholder="Informações adicionais..."
++                        ><?= $esc($dados['description'] ?? '') ?></textarea>
++
++                    </div>
++
++                </div>
++
++            </section>
++
++            <!-- RATEIO ENTRE MORADORES -->
++            <section class="card expense-create-card">
++
++                <h2>Rateio entre moradores</h2>
++
++                <p class="text-muted">
++                    Escolha como deseja dividir esta despesa.
++                </p>
++
++                <!-- Tipo de rateio -->
++                <div class="rateio-type">
++
++                    <label for="splitType">
++                        Tipo de rateio
++                    </label>
++
++                    <select
++                        id="splitType"
++                        name="split_type"
++                    >
++
++                        <option
++                            value="equal"
++                            <?= $tipoAtual === 'equal' ? 'selected' : '' ?>
++                        >
++                            Igualitário
++                        </option>
++
++                        <option
++                            value="percentage"
++                            <?= $tipoAtual === 'percentage' ? 'selected' : '' ?>
++                        >
++                            Percentual
++                        </option>
++
++                        <option
++                            value="custom"
++                            <?= $tipoAtual === 'custom' ? 'selected' : '' ?>
++                        >
++                            Personalizado
++                        </option>
++
++                    </select>
++
++                </div>
++
++                <!-- Lista de moradores -->
++                <div id="memberList">
++
++                    <?php foreach ($moradores as $morador): ?>
++
++                        <?php $id = (int) $morador['id']; ?>
++
++                        <div class="expense-create-member">
++
++                            <!-- Selecionar morador -->
++                            <input
++                                type="checkbox"
++                                class="expense-participant"
++                                id="member-<?= $id ?>"
++                                name="members[]"
++                                value="<?= $id ?>"
++                                <?= in_array($id, $selecionados, true) ? 'checked' : '' ?>
++                            >
++
++                            <label
++                                class="member-name"
++                                for="member-<?= $id ?>"
++                            >
++                                <?= $esc($morador['name']) ?>
++                            </label>
++
++                            <!-- Percentual ou valor personalizado -->
++                            <input
++                                type="number"
++                                class="member-value"
++                                name="values[<?= $id ?>]"
++                                step="0.01"
++                                min="0"
++                                placeholder="Valor"
++                                aria-label="Rateio de <?= $esc($morador['name']) ?>"
++                                value="<?= $esc($valoresAtuais[$id] ?? '') ?>"
++                            >
++
++                            <!-- Resultado -->
++                            <span class="member-result">
++                                —
++                            </span>
++
++                        </div>
++
++                    <?php endforeach; ?>
++
++                </div>
++
++                <!-- Mensagem dos cálculos -->
++                <p
++                    id="rateioMessage"
++                    class="rateio-message"
++                    aria-live="polite"
++                ></p>
++
++                <p class="rateio-note">
++                    O sistema valida os valores e distribui
++                    os centavos entre os participantes.
++                </p>
++
++            </section>
++
++            <!-- BOTÕES -->
++            <div class="expense-create-actions">
++
++                <button
++                    type="submit"
++                    id="saveExpense"
++                    class="expense-create-primary"
++                    disabled
++                >
++                    Salvar despesa
++                </button>
++
++                <a
++                    href="/despesas"
++                    class="expense-create-secondary"
++                >
++                    Cancelar
++                </a>
++
++            </div>
++
++        </form>
++
++    </main>
++
++</div>
++
++<!-- JAVASCRIPT DOS TRÊS TIPOS DE RATEIO -->
++<script>
++
++    // Elementos da página
++    const tipoRateio = document.getElementById('splitType');
++
++    const valorTotal = document.getElementById('expense-total');
++
++    const linhasRateio = [
++        ...document.querySelectorAll('.expense-create-member')
++    ];
++
++    const mensagem = document.getElementById('rateioMessage');
++
++    const salvar = document.getElementById('saveExpense');
++
++    // Formatação em reais
++    const moeda = new Intl.NumberFormat('pt-BR', {
++        style: 'currency',
++        currency: 'BRL'
++    });
++
++    // Converte um valor monetário para centavos
++    function converterCentavos(texto) {
++
++        texto = String(texto).trim().replace(',', '.');
++
++        if (!/^\d{1,8}(\.\d{1,2})?$/.test(texto)) {
++            return null;
++        }
++
++        const partes = texto.split('.');
++
++        const inteiro = Number(partes[0]);
++
++        const decimal = Number(
++            (partes[1] || '0').padEnd(2, '0')
++        );
++
++        const resultado = inteiro * 100 + decimal;
++
++        return Number.isSafeInteger(resultado)
++            ? resultado
++            : null;
++    }
++
++    // Converte porcentagens para centésimos de %
++    function converterPercentual(texto) {
++
++        texto = String(texto).trim().replace(',', '.');
++
++        if (!/^\d{1,3}(\.\d{1,2})?$/.test(texto)) {
++            return null;
++        }
++
++        const partes = texto.split('.');
++
++        const inteiro = Number(partes[0]);
++
++        const decimal = Number(
++            (partes[1] || '0').padEnd(2, '0')
++        );
++
++        const percentual = inteiro * 100 + decimal;
++
++        if (percentual > 10000) {
++            return null;
++        }
++
++        return percentual;
++    }
++
++    // Mostra uma mensagem e bloqueia o salvamento
++    function mostrarErro(texto) {
++
++        mensagem.textContent = texto;
++
++        mensagem.classList.add('error');
++
++        salvar.disabled = true;
++    }
++
++    // Mostra uma mensagem de sucesso
++    function mostrarSucesso(texto) {
++
++        mensagem.textContent = texto;
++
++        mensagem.classList.remove('error');
++
++        salvar.disabled = false;
++    }
++
++    // FUNÇÃO PRINCIPAL DO RATEIO
++    function calcularRateio() {
++
++        const tipo = tipoRateio.value;
++
++        const total = converterCentavos(valorTotal.value);
++
++        // Seleciona somente os moradores marcados
++        const ativos = linhasRateio.filter(linha => {
++
++            return linha.querySelector(
++                '.expense-participant'
++            ).checked;
++
++        });
++
++        // Ajusta os campos conforme o tipo de rateio
++        linhasRateio.forEach(linha => {
++
++            const campo = linha.querySelector('.member-value');
++
++            const selecionado = linha.querySelector(
++                '.expense-participant'
++            ).checked;
++
++            campo.style.display =
++                tipo === 'equal' ? 'none' : '';
++
++            campo.disabled =
++                tipo === 'equal' || !selecionado;
++
++            campo.required =
++                tipo !== 'equal' && selecionado;
++
++            campo.placeholder =
++                tipo === 'percentage'
++                    ? 'Porcentagem (%)'
++                    : 'Valor (R$)';
++
++            campo.max = tipo === 'percentage'
++                ? '100'
++                : '99999999.99';
++
++            // Limpa a prévia anterior
++            linha.querySelector('.member-result')
++                .textContent = '—';
++
++        });
++
++        // Valida o valor total
++        if (total === null || total <= 0) {
++
++            mostrarErro(
++                'Informe o valor total da despesa.'
++            );
++
++            return;
++        }
++
++        // Valida a quantidade de moradores
++        if (ativos.length === 0) {
++
++            mostrarErro(
++                'Selecione pelo menos um morador.'
++            );
++
++            return;
++        }
++
++        if (total < ativos.length) {
++
++            mostrarErro(
++                'O valor é insuficiente para os moradores.'
++            );
++
++            return;
++        }
++
++        const resultados = [];
++
++        // ==================================
++        // 1 - RATEIO IGUALITÁRIO
++        // ==================================
++        if (tipo === 'equal') {
++
++            const base = Math.floor(
++                total / ativos.length
++            );
++
++            const resto = total % ativos.length;
++
++            ativos.forEach((linha, indice) => {
++
++                const valor = base + (
++                    indice < resto ? 1 : 0
++                );
++
++                resultados.push(valor);
++
++            });
++
++        // ==================================
++        // 2 - RATEIO PERCENTUAL
++        // ==================================
++        } else if (tipo === 'percentage') {
++
++            const percentuais = [];
++
++            // Recebe os percentuais informados
++            for (const linha of ativos) {
++
++                const campo = linha.querySelector(
++                    '.member-value'
++                );
++
++                const percentual = converterPercentual(
++                    campo.value
++                );
++
++                if (percentual === null) {
++
++                    mostrarErro(
++                        'Informe porcentagens válidas.'
++                    );
++
++                    return;
++                }
++
++                percentuais.push(percentual);
++            }
++
++            // Soma os percentuais
++            const soma = percentuais.reduce(
++                (a, b) => a + b,
++                0
++            );
++
++            // A soma precisa ser 100%
++            if (soma !== 10000) {
++
++                mostrarErro(
++                    'As porcentagens devem somar 100%.'
++                );
++
++                return;
++            }
++
++            // Calcula as partes em centavos
++            const restos = [];
++
++            let distribuido = 0;
++
++            percentuais.forEach((percentual, indice) => {
++
++                const produto = total * percentual;
++
++                const parte = Math.floor(
++                    produto / 10000
++                );
++
++                resultados.push(parte);
++
++                restos.push({
++                    indice: indice,
++                    resto: produto % 10000
++                });
++
++                distribuido += parte;
++            });
++
++            // Distribui os centavos restantes
++            restos.sort((a, b) => {
++
++                return b.resto - a.resto ||
++                    a.indice - b.indice;
++
++            });
++
++            let faltam = total - distribuido;
++
++            for (const item of restos) {
++
++                if (faltam <= 0) {
++                    break;
++                }
++
++                resultados[item.indice]++;
++
++                faltam--;
++            }
++
++        // ==================================
++        // 3 - RATEIO PERSONALIZADO
++        // ==================================
++        } else if (tipo === 'custom') {
++
++            let soma = 0;
++
++            for (const linha of ativos) {
++
++                const campo = linha.querySelector(
++                    '.member-value'
++                );
++
++                const valor = converterCentavos(
++                    campo.value
++                );
++
++                if (valor === null) {
++
++                    mostrarErro(
++                        'Informe o valor de cada morador.'
++                    );
++
++                    return;
++                }
++
++                resultados.push(valor);
++
++                soma += valor;
++            }
++
++            // O total precisa ser igual ao da despesa
++            if (soma !== total) {
++
++                mostrarErro(
++                    'Os valores devem somar ' +
++                    moeda.format(total / 100) + '.'
++                );
++
++                return;
++            }
++
++        } else {
++
++            mostrarErro('Tipo de rateio inválido.');
++
++            return;
++        }
++
++        // Nenhum morador pode pagar R$ 0,00
++        if (resultados.some(valor => valor < 1)) {
++
++            mostrarErro(
++                'Cada morador deve pagar pelo menos R$ 0,01.'
++            );
++
++            return;
++        }
++
++        // Mostra o valor calculado para cada morador
++        ativos.forEach((linha, indice) => {
++
++            const resultado = linha.querySelector(
++                '.member-result'
++            );
++
++            resultado.textContent = moeda.format(
++                resultados[indice] / 100
++            );
++
++        });
++
++        // HABILITA O BOTÃO SALVAR
++        mostrarSucesso(
++            'Rateio válido: ' +
++            moeda.format(total / 100) +
++            ' distribuídos entre ' +
++            ativos.length +
++            ' morador(es).'
++        );
++    }
++
++    // Atualiza quando o usuário muda o tipo de rateio
++    tipoRateio.addEventListener('change', function () {
++
++        // Evita reaproveitar porcentagens como valores em reais
++        linhasRateio.forEach(linha => {
++
++            linha.querySelector('.member-value').value = '';
++
++        });
++
++        calcularRateio();
++    });
++
++    // Atualiza quando o valor total muda
++    valorTotal.addEventListener(
++        'input',
++        calcularRateio
++    );
++
++    // Atualiza quando os moradores ou valores mudam
++    linhasRateio.forEach(linha => {
++
++        const checkbox = linha.querySelector(
++            '.expense-participant'
++        );
++
++        const campo = linha.querySelector('.member-value');
++
++        checkbox.addEventListener(
++            'change',
++            calcularRateio
++        );
++
++        campo.addEventListener(
++            'input',
++            calcularRateio
++        );
++
++    });
++
++    // Calcula ao abrir o formulário
++    calcularRateio();
++
++</script>
++
++<?php require __DIR__ . '/../partials/footer.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Views/expenses/edit.php /mnt/data/integracao_rep/stage2/app/Views/expenses/edit.php
+--- /mnt/data/integracao_rep/base/app/Views/expenses/edit.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Views/expenses/edit.php	2026-11-15 01:33:25.040590378 +0000
+@@ -0,0 +1,807 @@
++
++<?php
++
++$pageTitle = 'Editar despesa - RepubliCAIXA';
++$currentPage = 'expenses';
++
++$esc = static function ($valor): string {
++    return htmlspecialchars(
++        is_scalar($valor) ? (string) $valor : '',
++        ENT_QUOTES,
++        'UTF-8'
++    );
++};
++
++// Identifica o tipo de rateio salvo
++$tipoAtual = $dados['split_type'] ?? 'equal';
++
++if (!in_array(
++    $tipoAtual,
++    ['equal', 'percentage', 'custom'],
++    true
++)) {
++    $tipoAtual = 'equal';
++}
++
++// Recupera os valores de cada morador
++$valoresAtuais = is_array($valoresAtuais ?? null)
++    ? $valoresAtuais
++    : [];
++
++require __DIR__ . '/../partials/header.php';
++
++?>
++
++<style>
++    .expense-edit {
++        max-width: 1050px;
++    }
++
++    .expense-edit .edit-head {
++        display: flex;
++        justify-content: space-between;
++        align-items: center;
++        gap: 16px;
++        flex-wrap: wrap;
++    }
++
++    .expense-edit .edit-card {
++        margin-top: 22px;
++    }
++
++    .expense-edit .edit-card h2 {
++        margin-bottom: 18px;
++    }
++
++    .expense-edit .edit-grid {
++        display: grid;
++        grid-template-columns: repeat(2, minmax(0, 1fr));
++        gap: 18px;
++    }
++
++    .expense-edit .edit-field {
++        display: flex;
++        flex-direction: column;
++        gap: 7px;
++    }
++
++    .expense-edit .edit-field.full {
++        grid-column: 1 / -1;
++    }
++
++    .expense-edit .edit-field label,
++    .expense-edit .edit-select-label {
++        font-weight: 600;
++    }
++
++    .expense-edit .edit-field input,
++    .expense-edit .edit-field select,
++    .expense-edit .edit-field textarea,
++    .expense-edit .edit-type select {
++        width: 100%;
++        padding: 12px;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        background: white;
++        color: #1e293b;
++        font: inherit;
++    }
++
++    .expense-edit .edit-type {
++        margin: 20px 0;
++    }
++
++    .expense-edit .edit-type label {
++        display: block;
++        margin-bottom: 8px;
++    }
++
++    .expense-edit .edit-member {
++        display: flex;
++        align-items: center;
++        flex-wrap: wrap;
++        gap: 12px;
++        padding: 12px 0;
++        border-bottom: 1px solid #e2e8f0;
++    }
++
++    .expense-edit .edit-member .member-check {
++        width: 18px;
++        height: 18px;
++    }
++
++    .expense-edit .edit-member label {
++        flex: 1;
++        min-width: 150px;
++    }
++
++    .expense-edit .edit-member .member-value {
++        width: 160px;
++        padding: 10px;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        font: inherit;
++    }
++
++    .expense-edit .edit-member .member-result {
++        min-width: 110px;
++        text-align: right;
++        font-weight: 600;
++        color: #0f766e;
++    }
++
++    .expense-edit .edit-feedback {
++        margin-top: 16px;
++        font-weight: 600;
++        color: #0f766e;
++    }
++
++    .expense-edit .edit-feedback.error {
++        color: #dc2626;
++    }
++
++    .expense-edit .edit-alert {
++        margin-top: 18px;
++        padding: 14px 16px;
++        border-radius: 8px;
++        color: #991b1b;
++        background: #fef2f2;
++    }
++
++    .expense-edit .edit-actions {
++        display: flex;
++        gap: 16px;
++        flex-wrap: wrap;
++        align-items: center;
++        margin-top: 24px;
++    }
++
++    .expense-edit .edit-save {
++        padding: 12px 20px;
++        border: 0;
++        border-radius: 8px;
++        background: #0f766e;
++        color: white;
++        font-weight: 600;
++        cursor: pointer;
++    }
++
++    .expense-edit .edit-save:disabled {
++        background: #94a3b8;
++        opacity: 0.75;
++        cursor: not-allowed;
++    }
++
++    .expense-edit .edit-link {
++        color: #0f766e;
++        font-weight: 600;
++        text-decoration: none;
++    }
++
++    @media (max-width: 650px) {
++        .expense-edit .edit-grid {
++            grid-template-columns: 1fr;
++        }
++
++        .expense-edit .edit-member .member-result {
++            text-align: left;
++        }
++    }
++</style>
++
++<div class="app-layout">
++
++    <!-- MENU LATERAL -->
++    <?php require __DIR__ . '/../partials/sidebar.php'; ?>
++
++    <main class="main-content expense-edit">
++
++        <!-- CABEÇALHO -->
++        <div class="page-header edit-head">
++
++            <div>
++                <h1>
++                    Editar despesa #<?= (int) $despesa['id'] ?>
++                </h1>
++
++                <p class="text-muted">
++                    Altere os dados e o tipo de rateio da despesa.
++                </p>
++            </div>
++
++            <a class="edit-link" href="/despesas">
++                Voltar para despesas
++            </a>
++
++        </div>
++
++        <!-- AVISO DE PAGAMENTOS -->
++        <?php if ($bloqueada): ?>
++
++            <div class="edit-alert" role="alert">
++                Esta despesa já possui pagamentos registrados.
++                A edição está bloqueada para proteger
++                os valores e comprovantes.
++            </div>
++
++        <?php endif; ?>
++
++        <!-- ERROS -->
++        <?php foreach ($erros as $erro): ?>
++
++            <div class="edit-alert" role="alert">
++                <?= $esc($erro) ?>
++            </div>
++
++        <?php endforeach; ?>
++
++        <!-- FORMULÁRIO -->
++        <form
++            id="editExpenseForm"
++            method="post"
++            action="/despesas/editar?id=<?= (int) $despesa['id'] ?>"
++        >
++
++            <input
++                type="hidden"
++                name="_csrf"
++                value="<?= $esc($csrf) ?>"
++            >
++
++            <fieldset
++                style="border:0;padding:0;margin:0;min-width:0"
++                <?= $bloqueada ? 'disabled' : '' ?>
++            >
++
++                <!-- INFORMAÇÕES DA DESPESA -->
++                <section class="card edit-card">
++
++                    <h2>Informações da despesa</h2>
++
++                    <div class="edit-grid">
++
++                        <div class="edit-field full">
++
++                            <label for="edit-title">
++                                Nome da despesa *
++                            </label>
++
++                            <input
++                                id="edit-title"
++                                name="title"
++                                maxlength="150"
++                                required
++                                value="<?= $esc($dados['title'] ?? '') ?>"
++                            >
++
++                        </div>
++
++                        <div class="edit-field">
++
++                            <label for="edit-category">
++                                Categoria *
++                            </label>
++
++                            <select
++                                id="edit-category"
++                                name="category_id"
++                                required
++                            >
++
++                                <option value="">
++                                    Selecione...
++                                </option>
++
++                                <?php foreach ($categorias as $categoria): ?>
++
++                                    <option
++                                        value="<?= (int) $categoria['id'] ?>"
++                                        <?= (int) ($dados['category_id'] ?? 0) === (int) $categoria['id'] ? 'selected' : '' ?>
++                                    >
++                                        <?= $esc($categoria['name']) ?>
++                                    </option>
++
++                                <?php endforeach; ?>
++
++                            </select>
++
++                        </div>
++
++                        <div class="edit-field">
++
++                            <label for="edit-total">
++                                Valor total (R$) *
++                            </label>
++
++                            <input
++                                id="edit-total"
++                                type="number"
++                                name="total_amount"
++                                step="0.01"
++                                min="0.01"
++                                max="99999999.99"
++                                required
++                                value="<?= $esc($dados['total_amount'] ?? '') ?>"
++                            >
++
++                        </div>
++
++                        <div class="edit-field">
++
++                            <label for="edit-date">
++                                Data da despesa *
++                            </label>
++
++                            <input
++                                id="edit-date"
++                                type="date"
++                                name="expense_date"
++                                required
++                                value="<?= $esc($dados['expense_date'] ?? '') ?>"
++                            >
++
++                        </div>
++
++                        <div class="edit-field">
++
++                            <label for="edit-due">
++                                Vencimento
++                            </label>
++
++                            <input
++                                id="edit-due"
++                                type="date"
++                                name="due_date"
++                                value="<?= $esc($dados['due_date'] ?? '') ?>"
++                            >
++
++                        </div>
++
++                        <div class="edit-field full">
++
++                            <label for="edit-description">
++                                Descrição (opcional)
++                            </label>
++
++                            <textarea
++                                id="edit-description"
++                                name="description"
++                                rows="3"
++                            ><?= $esc($dados['description'] ?? '') ?></textarea>
++
++                        </div>
++
++                    </div>
++
++                </section>
++
++                <!-- RATEIO -->
++                <section class="card edit-card">
++
++                    <h2>Rateio entre moradores</h2>
++
++                    <p class="text-muted">
++                        Escolha quem participa e como o valor será dividido.
++                    </p>
++
++                    <div class="edit-type">
++
++                        <label
++                            class="edit-select-label"
++                            for="edit-split-type"
++                        >
++                            Tipo de rateio
++                        </label>
++
++                        <select
++                            id="edit-split-type"
++                            name="split_type"
++                        >
++
++                            <option
++                                value="equal"
++                                <?= $tipoAtual === 'equal' ? 'selected' : '' ?>
++                            >
++                                Igualitário
++                            </option>
++
++                            <option
++                                value="percentage"
++                                <?= $tipoAtual === 'percentage' ? 'selected' : '' ?>
++                            >
++                                Percentual
++                            </option>
++
++                            <option
++                                value="custom"
++                                <?= $tipoAtual === 'custom' ? 'selected' : '' ?>
++                            >
++                                Personalizado
++                            </option>
++
++                        </select>
++
++                    </div>
++
++                    <!-- MORADORES -->
++                    <?php foreach ($moradores as $morador): ?>
++
++                        <?php $moradorId = (int) $morador['id']; ?>
++
++                        <div class="edit-member">
++
++                            <input
++                                class="member-check"
++                                type="checkbox"
++                                id="edit-member-<?= $moradorId ?>"
++                                name="members[]"
++                                value="<?= $moradorId ?>"
++                                <?= in_array($moradorId, $selecionados, true) ? 'checked' : '' ?>
++                            >
++
++                            <label for="edit-member-<?= $moradorId ?>">
++                                <?= $esc($morador['name']) ?>
++                            </label>
++
++                            <!-- VALOR OU PERCENTUAL -->
++                            <input
++                                class="member-value"
++                                type="number"
++                                step="0.01"
++                                min="0"
++                                name="values[<?= $moradorId ?>]"
++                                aria-label="Valor ou porcentagem de <?= $esc($morador['name']) ?>"
++                                value="<?= $esc($valoresAtuais[$moradorId] ?? '') ?>"
++                            >
++
++                            <!-- PRÉVIA -->
++                            <span class="member-result">
++                                —
++                            </span>
++
++                        </div>
++
++                    <?php endforeach; ?>
++
++                    <p
++                        id="edit-feedback"
++                        class="edit-feedback"
++                        aria-live="polite"
++                    ></p>
++
++                </section>
++
++            </fieldset>
++
++            <!-- BOTÕES -->
++            <div class="edit-actions">
++
++                <button
++                    id="edit-save"
++                    type="submit"
++                    class="edit-save"
++                    disabled
++                >
++                    Salvar alterações
++                </button>
++
++                <a class="edit-link" href="/despesas">
++                    Cancelar
++                </a>
++
++            </div>
++
++        </form>
++
++    </main>
++
++</div>
++
++<!-- JAVASCRIPT DO RATEIO -->
++<script>
++
++(() => {
++
++    const bloqueada = <?= $bloqueada ? 'true' : 'false' ?>;
++
++    const tipo = document.getElementById('edit-split-type');
++    const valorTotal = document.getElementById('edit-total');
++
++    const linhas = [
++        ...document.querySelectorAll('.expense-edit .edit-member')
++    ];
++
++    const mensagem = document.getElementById('edit-feedback');
++    const salvar = document.getElementById('edit-save');
++    const formulario = document.getElementById('editExpenseForm');
++
++    const moeda = new Intl.NumberFormat('pt-BR', {
++        style: 'currency',
++        currency: 'BRL'
++    });
++
++    // Converte valores para inteiros, evitando erros de centavos
++    function unidades(texto, decimais, limiteInteiro) {
++
++        const exp = new RegExp(
++            '^\\d{1,' + limiteInteiro +
++            '}(?:[.,]\\d{1,' + decimais + '})?$'
++        );
++
++        texto = String(texto).trim();
++
++        if (!exp.test(texto)) {
++            return null;
++        }
++
++        const partes = texto.replace(',', '.').split('.');
++        const fator = 10 ** decimais;
++
++        const valor =
++            Number(partes[0]) * fator +
++            Number(
++                (partes[1] || '0').padEnd(decimais, '0')
++            );
++
++        return Number.isSafeInteger(valor)
++            ? valor
++            : null;
++    }
++
++    // FUNÇÃO PRINCIPAL
++    function calcular() {
++
++        const total = unidades(valorTotal.value, 2, 8);
++        const modo = tipo.value;
++
++        const ativos = linhas.filter(linha =>
++            linha.querySelector('.member-check').checked
++        );
++
++        const partes = [];
++
++        // CONFIGURAR CAMPOS
++        linhas.forEach(linha => {
++
++            const selecionada = linha.querySelector(
++                '.member-check'
++            ).checked;
++
++            const campo = linha.querySelector('.member-value');
++
++            campo.style.display =
++                modo === 'equal' ? 'none' : '';
++
++            campo.disabled =
++                bloqueada || modo === 'equal' || !selecionada;
++
++            campo.required =
++                !bloqueada && modo !== 'equal' && selecionada;
++
++            campo.placeholder =
++                modo === 'percentage'
++                    ? 'Porcentagem (%)'
++                    : 'Valor (R$)';
++
++            campo.max =
++                modo === 'percentage'
++                    ? '100'
++                    : '99999999.99';
++
++            linha.querySelector('.member-result')
++                .textContent = '—';
++        });
++
++        function aviso(texto, valido = false) {
++
++            mensagem.textContent = texto;
++
++            mensagem.classList.toggle('error', !valido);
++
++            salvar.disabled = bloqueada || !valido;
++        }
++
++        // VALIDAR INFORMAÇÕES
++        if (bloqueada) {
++            aviso('A edição está bloqueada porque existem pagamentos.');
++            return;
++        }
++
++        if (total === null || total <= 0) {
++            aviso('Informe um valor total válido.');
++            return;
++        }
++
++        if (ativos.length === 0) {
++            aviso('Selecione pelo menos um morador.');
++            return;
++        }
++
++        if (total < ativos.length) {
++            aviso('O valor é insuficiente para os moradores.');
++            return;
++        }
++
++        // 1 - IGUALITÁRIO
++        if (modo === 'equal') {
++
++            const base = Math.floor(total / ativos.length);
++            const resto = total % ativos.length;
++
++            ativos.forEach((linha, indice) => {
++
++                partes.push(
++                    base + (indice < resto ? 1 : 0)
++                );
++            });
++
++        // 2 - PERCENTUAL
++        } else if (modo === 'percentage') {
++
++            const porcentagens = ativos.map(linha => {
++
++                return unidades(
++                    linha.querySelector('.member-value').value,
++                    2,
++                    3
++                );
++            });
++
++            if (porcentagens.some(
++                p => p === null || p > 10000
++            )) {
++                aviso('Informe porcentagens válidas (até 100%).');
++                return;
++            }
++
++            const soma = porcentagens.reduce(
++                (a, b) => a + b,
++                0
++            );
++
++            if (soma !== 10000) {
++                aviso('As porcentagens devem somar 100%.');
++                return;
++            }
++
++            const restos = [];
++            let distribuido = 0;
++
++            porcentagens.forEach((percentual, indice) => {
++
++                const produto = total * percentual;
++
++                const parte = Math.floor(
++                    produto / 10000
++                );
++
++                partes.push(parte);
++
++                restos.push({
++                    indice: indice,
++                    resto: produto % 10000
++                });
++
++                distribuido += parte;
++            });
++
++            restos.sort((a, b) =>
++                b.resto - a.resto ||
++                a.indice - b.indice
++            );
++
++            let faltam = total - distribuido;
++
++            for (const item of restos) {
++
++                if (faltam <= 0) {
++                    break;
++                }
++
++                partes[item.indice]++;
++                faltam--;
++            }
++
++        // 3 - PERSONALIZADO
++        } else if (modo === 'custom') {
++
++            for (const linha of ativos) {
++
++                const valor = unidades(
++                    linha.querySelector('.member-value').value,
++                    2,
++                    8
++                );
++
++                if (valor === null) {
++                    aviso('Informe o valor de cada morador.');
++                    return;
++                }
++
++                partes.push(valor);
++            }
++
++            const soma = partes.reduce(
++                (a, b) => a + b,
++                0
++            );
++
++            if (soma !== total) {
++                aviso(
++                    'Os valores devem somar ' +
++                    moeda.format(total / 100) + '.'
++                );
++                return;
++            }
++
++        } else {
++            aviso('Tipo de rateio inválido.');
++            return;
++        }
++
++        // VERIFICAR VALORES POSITIVOS
++        if (partes.some(parte => parte < 1)) {
++            aviso('Cada morador deve pagar pelo menos R$ 0,01.');
++            return;
++        }
++
++        // MOSTRAR RESULTADOS
++        ativos.forEach((linha, indice) => {
++
++            linha.querySelector('.member-result')
++                .textContent = moeda.format(
++                    partes[indice] / 100
++                );
++        });
++
++        // HABILITAR BOTÃO
++        aviso(
++            'Rateio válido: ' +
++            moeda.format(total / 100) +
++            ' entre ' +
++            ativos.length +
++            ' morador(es).',
++            true
++        );
++    }
++
++    // EVENTOS
++    tipo.addEventListener('change', function () {
++
++        // Evita usar valores monetários como porcentagens
++        linhas.forEach(linha => {
++            linha.querySelector('.member-value').value = '';
++        });
++
++        calcular();
++    });
++
++    valorTotal.addEventListener('input', calcular);
++
++    linhas.forEach(linha => {
++
++        linha.querySelector('.member-check')
++            .addEventListener('change', calcular);
++
++        linha.querySelector('.member-value')
++            .addEventListener('input', calcular);
++    });
++
++    // Verifica novamente antes de enviar
++    formulario.addEventListener('submit', function (evento) {
++
++        calcular();
++
++        if (salvar.disabled) {
++            evento.preventDefault();
++        }
++    });
++
++    // Carrega o rateio atual
++    calcular();
++
++})();
++
++</script>
++
++<?php require __DIR__ . '/../partials/footer.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Views/expenses/index.php /mnt/data/integracao_rep/stage2/app/Views/expenses/index.php
+--- /mnt/data/integracao_rep/base/app/Views/expenses/index.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Views/expenses/index.php	2026-11-15 01:33:25.040666006 +0000
+@@ -0,0 +1,463 @@
++
++<?php
++
++$pageTitle = 'Despesas - RepubliCAIXA';
++$currentPage = 'expenses';
++
++$despesas = $despesas ?? [];
++$republica = $republica ?? null;
++
++$esc = static fn ($valor): string =>
++    htmlspecialchars(
++        (string) ($valor ?? ''),
++        ENT_QUOTES,
++        'UTF-8'
++    );
++
++$dinheiro = static fn (float $valor): string =>
++    'R$ ' . number_format($valor, 2, ',', '.');
++
++// Totais financeiros
++$total = 0.0;
++$pago = 0.0;
++
++foreach ($despesas as $despesa) {
++    $valor = (float) $despesa['total_amount'];
++    $total += $valor;
++
++    $pago += max(
++        0,
++        min($valor, (float) $despesa['paid_amount'])
++    );
++}
++
++$pendente = max(0, $total - $pago);
++
++require __DIR__ . '/../partials/header.php';
++
++?>
++
++<style>
++    .expenses-page-header {
++        display: flex;
++        justify-content: space-between;
++        align-items: center;
++        flex-wrap: wrap;
++        gap: 16px;
++    }
++
++    .expenses-new-button {
++        display: inline-flex;
++        padding: 12px 20px;
++        color: white;
++        background: #0f766e;
++        text-decoration: none;
++        border-radius: 8px;
++        font-weight: 600;
++    }
++
++    .expenses-new-button:hover {
++        background: #115e59;
++        color: white;
++    }
++
++    .expenses-list {
++        margin-top: 24px;
++    }
++
++    .expenses-list h2 {
++        margin-bottom: 20px;
++    }
++
++    .expenses-filters {
++        display: flex;
++        gap: 15px;
++        margin-bottom: 20px;
++        flex-wrap: wrap;
++    }
++
++    .expenses-filters input,
++    .expenses-filters select {
++        flex: 1;
++        min-width: 190px;
++        padding: 12px;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        background: white;
++        font-size: 14px;
++    }
++
++    .expenses-table-container {
++        width: 100%;
++        overflow-x: auto;
++    }
++
++    .expenses-table {
++        width: 100%;
++        border-collapse: collapse;
++        text-align: left;
++    }
++
++    .expenses-table th,
++    .expenses-table td {
++        padding: 15px;
++        border-bottom: 1px solid #e2e8f0;
++    }
++
++    .expenses-table th {
++        color: #64748b;
++        font-weight: 600;
++    }
++
++    .expenses-table tbody tr:hover {
++        background: #f8fafc;
++    }
++
++    .expenses-empty {
++        padding: 20px 0;
++        color: #64748b;
++    }
++
++    .expenses-actions {
++        display: flex;
++        flex-wrap: wrap;
++        gap: 12px;
++    }
++
++    .expenses-actions a {
++        color: #0f766e;
++        font-weight: 600;
++        text-decoration: none;
++    }
++
++    .expenses-actions a:hover {
++        text-decoration: underline;
++    }
++</style>
++
++<div class="app-layout">
++
++    <?php require __DIR__ . '/../partials/sidebar.php'; ?>
++
++    <main class="main-content">
++
++        <!-- CABEÇALHO -->
++        <div class="page-header expenses-page-header">
++
++            <div>
++                <h1>Despesas</h1>
++
++                <p class="text-muted">
++                    Controle as despesas da sua república.
++                </p>
++
++                <?php if ($republica !== null): ?>
++
++                    <p class="text-muted">
++                        República:
++                        <?= $esc($republica['name']) ?>
++                    </p>
++
++                <?php endif; ?>
++
++            </div>
++
++            <a
++                class="expenses-new-button"
++                href="/despesas/nova"
++            >
++                + Nova despesa
++            </a>
++
++        </div>
++
++        <?php if ($republica === null): ?>
++
++            <p class="expenses-empty">
++                Seu usuário ainda não está vinculado
++                a uma república.
++            </p>
++
++        <?php endif; ?>
++
++        <!-- RESUMO FINANCEIRO -->
++        <section class="card-grid">
++
++            <article class="card">
++                <span class="card-label">
++                    Total cadastrado
++                </span>
++
++                <strong class="card-value">
++                    <?= $dinheiro($total) ?>
++                </strong>
++            </article>
++
++            <article class="card">
++                <span class="card-label">
++                    Total pago
++                </span>
++
++                <strong class="card-value status-success">
++                    <?= $dinheiro($pago) ?>
++                </strong>
++            </article>
++
++            <article class="card">
++                <span class="card-label">
++                    Pendente
++                </span>
++
++                <strong class="card-value status-danger">
++                    <?= $dinheiro($pendente) ?>
++                </strong>
++            </article>
++
++        </section>
++
++        <!-- LISTA DE DESPESAS -->
++        <section class="card expenses-list">
++
++            <h2>Lista de despesas</h2>
++
++            <!-- FILTROS -->
++            <div class="expenses-filters">
++
++                <input
++                    type="search"
++                    id="searchExpense"
++                    placeholder="Pesquisar despesa..."
++                    aria-label="Pesquisar despesa"
++                >
++
++                <select
++                    id="filterStatus"
++                    aria-label="Filtrar por status"
++                >
++
++                    <option value="todos">
++                        Todos os status
++                    </option>
++
++                    <option value="pago">
++                        Pago
++                    </option>
++
++                    <option value="pendente">
++                        Pendente
++                    </option>
++
++                    <option value="parcial">
++                        Parcial
++                    </option>
++
++                </select>
++
++            </div>
++
++            <div class="expenses-table-container">
++
++                <table class="expenses-table">
++
++                    <thead>
++                        <tr>
++                            <th>Descrição</th>
++                            <th>Categoria</th>
++                            <th>Valor</th>
++                            <th>Vencimento</th>
++                            <th>Status</th>
++                            <th>Ações</th>
++                        </tr>
++                    </thead>
++
++                    <tbody>
++
++                    <?php foreach ($despesas as $despesa): ?>
++
++                        <?php
++
++                        $valor = (float)
++                            $despesa['total_amount'];
++
++                        $valorPago = max(
++                            0,
++                            min(
++                                $valor,
++                                (float) $despesa['paid_amount']
++                            )
++                        );
++
++                        if ($valorPago >= $valor - 0.005) {
++
++                            $status = 'pago';
++                            $classe = 'status-success';
++
++                        } elseif ($valorPago > 0) {
++
++                            $status = 'parcial';
++                            $classe = 'status-warning';
++
++                        } else {
++
++                            $status = 'pendente';
++                            $classe = 'status-danger';
++                        }
++
++                        $vencimento = $despesa['due_date']
++                            ? date(
++                                'd/m/Y',
++                                strtotime($despesa['due_date'])
++                            )
++                            : 'Não informado';
++
++                        ?>
++
++                        <tr data-status="<?= $status ?>">
++
++                            <td>
++                                <?= $esc($despesa['title']) ?>
++                            </td>
++
++                            <td>
++                                <?= $esc(
++                                    $despesa['category_name']
++                                    ?? 'Sem categoria'
++                                ) ?>
++                            </td>
++
++                            <td>
++                                <?= $dinheiro($valor) ?>
++                            </td>
++
++                            <td>
++                                <?= $esc($vencimento) ?>
++                            </td>
++
++                            <td>
++                                <span class="<?= $classe ?>">
++                                    <?= ucfirst($status) ?>
++                                </span>
++                            </td>
++
++                            <!-- AÇÕES DA DESPESA -->
++                            <td>
++
++                                <div class="expenses-actions">
++
++                                    <a
++                                        href="/despesas/editar?id=<?= (int) $despesa['id'] ?>"
++                                    >
++                                        Editar
++                                    </a>
++
++                                    <a
++                                        href="/despesas/detalhes?id=<?= (int) $despesa['id'] ?>"
++                                    >
++                                        Detalhes
++                                    </a>
++
++                                </div>
++
++                            </td>
++
++                        </tr>
++
++                    <?php endforeach; ?>
++
++                    </tbody>
++
++                </table>
++
++            </div>
++
++            <?php if (!$despesas): ?>
++
++                <p class="expenses-empty">
++                    Nenhuma despesa cadastrada nesta república.
++                </p>
++
++            <?php endif; ?>
++
++            <p
++                id="emptyMessage"
++                class="expenses-empty"
++                style="display: none;"
++            >
++                Nenhuma despesa encontrada com esses filtros.
++            </p>
++
++        </section>
++
++    </main>
++
++</div>
++
++<!-- FILTROS JAVASCRIPT -->
++<script>
++
++    const pesquisa = document.getElementById(
++        'searchExpense'
++    );
++
++    const filtro = document.getElementById(
++        'filterStatus'
++    );
++
++    const linhas = document.querySelectorAll(
++        '.expenses-table tbody tr'
++    );
++
++    const vazio = document.getElementById(
++        'emptyMessage'
++    );
++
++    function filtrarDespesas() {
++
++        const texto = pesquisa.value
++            .trim()
++            .toLocaleLowerCase('pt-BR');
++
++        const status = filtro.value;
++
++        let encontrados = 0;
++
++        linhas.forEach(linha => {
++
++            const descricao = linha.cells[0]
++                .textContent
++                .toLocaleLowerCase('pt-BR');
++
++            const exibir =
++                descricao.includes(texto) &&
++                (
++                    status === 'todos' ||
++                    linha.dataset.status === status
++                );
++
++            linha.style.display = exibir ? '' : 'none';
++
++            if (exibir) {
++                encontrados++;
++            }
++
++        });
++
++        vazio.style.display =
++            linhas.length && encontrados === 0
++                ? 'block'
++                : 'none';
++    }
++
++    pesquisa.addEventListener(
++        'input',
++        filtrarDespesas
++    );
++
++    filtro.addEventListener(
++        'change',
++        filtrarDespesas
++    );
++
++</script>
++
++<?php require __DIR__ . '/../partials/footer.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Views/expenses/show.php /mnt/data/integracao_rep/stage2/app/Views/expenses/show.php
+--- /mnt/data/integracao_rep/base/app/Views/expenses/show.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Views/expenses/show.php	2026-11-15 01:33:25.040745654 +0000
+@@ -0,0 +1,946 @@
++
++<?php
++
++$pageTitle = 'Detalhes da despesa - RepubliCAIXA';
++$currentPage = 'expenses';
++
++$esc = static fn ($valor): string => htmlspecialchars(
++    (string) ($valor ?? ''),
++    ENT_QUOTES,
++    'UTF-8'
++);
++
++$moeda = static fn ($valor): string => 'R$ ' . number_format(
++    (float) $valor,
++    2,
++    ',',
++    '.'
++);
++
++$dataBR = static function ($valor): string {
++    if (!$valor) {
++        return 'Não informado';
++    }
++
++    $tempo = strtotime((string) $valor);
++
++    return $tempo === false
++        ? 'Não informado'
++        : date('d/m/Y', $tempo);
++};
++
++$tipos = [
++    'equal' => 'Igualitário',
++    'percentage' => 'Percentual',
++    'custom' => 'Personalizado',
++];
++
++// IDENTIFICAR O USUÁRIO LOGADO
++$usuario = \App\Core\Session::get('user');
++
++$usuarioId = is_array($usuario)
++    ? (int) ($usuario['id'] ?? 0)
++    : 0;
++
++// BUSCAR O PAPEL DO USUÁRIO NA REPÚBLICA
++$consultaMembro = \App\Core\Database::connection()->prepare(
++    'SELECT id, role
++     FROM republic_members
++     WHERE republic_id = :republica
++       AND user_id = :usuario
++       AND active = 1
++     LIMIT 1'
++);
++
++$consultaMembro->execute([
++    'republica' => (int) $despesa['republic_id'],
++    'usuario' => $usuarioId,
++]);
++
++$membroAtual = $consultaMembro->fetch(
++    \PDO::FETCH_ASSOC
++) ?: [];
++
++$membroId = (int) ($membroAtual['id'] ?? 0);
++
++$ehAdmin = ($membroAtual['role'] ?? '') === 'admin';
++
++// TOKEN DE SEGURANÇA DOS FORMULÁRIOS
++$csrf = \App\Core\Session::get('csrf_despesas');
++
++if (!is_string($csrf) || $csrf === '') {
++    $csrf = bin2hex(random_bytes(32));
++
++    \App\Core\Session::set(
++        'csrf_despesas',
++        $csrf
++    );
++}
++
++// VALORES REGISTRADOS OU AGUARDANDO CONFIRMAÇÃO
++$comprometidoPorParte = [];
++
++foreach ($pagamentos as $pagamento) {
++    if (
++        in_array(
++            $pagamento['status'],
++            ['pending', 'confirmed'],
++            true
++        )
++    ) {
++        $idParte = (int) $pagamento['expense_share_id'];
++
++        $comprometidoPorParte[$idParte] =
++            ($comprometidoPorParte[$idParte] ?? 0)
++            + \App\Services\ExpenseRateio::centavos(
++                (string) $pagamento['amount']
++            );
++    }
++}
++
++// RESUMO FINANCEIRO
++$total = (float) $despesa['total_amount'];
++
++$restante = max(
++    0.0,
++    $total - $totalPago
++);
++
++$statusGeral = $restante < 0.005
++    ? 'Pago'
++    : ($totalPago > 0 ? 'Parcial' : 'Pendente');
++
++require __DIR__ . '/../partials/header.php';
++
++?>
++
++<style>
++    .details-page {
++        max-width: 1100px;
++    }
++
++    .details-header {
++        display: flex;
++        justify-content: space-between;
++        align-items: center;
++        flex-wrap: wrap;
++        gap: 16px;
++    }
++
++    .details-actions {
++        display: flex;
++        gap: 16px;
++        flex-wrap: wrap;
++    }
++
++    .details-actions a,
++    .details-link {
++        color: #0f766e;
++        text-decoration: none;
++        font-weight: 600;
++    }
++
++    .details-cards {
++        display: grid;
++        grid-template-columns: repeat(3, minmax(0, 1fr));
++        gap: 16px;
++        margin: 24px 0;
++    }
++
++    .details-cards .card,
++    .details-section {
++        padding: 22px;
++    }
++
++    .details-section {
++        margin-top: 20px;
++    }
++
++    .details-section h2 {
++        margin-bottom: 18px;
++    }
++
++    .details-label {
++        display: block;
++        color: #64748b;
++        font-size: 14px;
++        margin-bottom: 7px;
++    }
++
++    .details-number {
++        font-size: 24px;
++        font-weight: 700;
++    }
++
++    .details-grid {
++        display: grid;
++        grid-template-columns: repeat(2, minmax(0, 1fr));
++        gap: 18px;
++    }
++
++    .details-grid strong {
++        display: block;
++        overflow-wrap: anywhere;
++    }
++
++    .details-table-wrap {
++        overflow-x: auto;
++    }
++
++    .details-table {
++        width: 100%;
++        border-collapse: collapse;
++        text-align: left;
++    }
++
++    .details-table th,
++    .details-table td {
++        padding: 12px 10px;
++        border-bottom: 1px solid #e2e8f0;
++    }
++
++    .details-table th {
++        color: #64748b;
++        font-weight: 600;
++    }
++
++    .details-description {
++        white-space: pre-wrap;
++        overflow-wrap: anywhere;
++    }
++
++    .details-note {
++        color: #64748b;
++        margin-top: 12px;
++    }
++
++    .details-notice {
++        margin: 20px 0;
++        padding: 14px 16px;
++        background: #f0fdfa;
++        border: 1px solid #99f6e4;
++        border-radius: 8px;
++        color: #115e59;
++    }
++
++    .details-payment-list {
++        display: grid;
++        gap: 16px;
++    }
++
++    .details-payment-item {
++        border: 1px solid #e2e8f0;
++        border-radius: 10px;
++        padding: 18px;
++    }
++
++    .details-payment-item h3 {
++        margin: 0 0 12px;
++    }
++
++    .details-payment-item p {
++        margin: 6px 0;
++    }
++
++    .details-form {
++        display: flex;
++        flex-wrap: wrap;
++        align-items: flex-end;
++        gap: 12px;
++        margin-top: 14px;
++    }
++
++    .details-field {
++        display: flex;
++        flex-direction: column;
++        gap: 6px;
++    }
++
++    .details-field label {
++        font-weight: 600;
++    }
++
++    .details-field input[type="number"],
++    .details-field input[type="file"] {
++        font: inherit;
++        max-width: 100%;
++        padding: 10px;
++        background: white;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++    }
++
++    .details-btn {
++        background: #0f766e;
++        color: white;
++        border: 0;
++        padding: 11px 16px;
++        border-radius: 8px;
++        font: inherit;
++        font-weight: 600;
++        cursor: pointer;
++    }
++
++    .details-btn:hover {
++        background: #115e59;
++    }
++
++    .details-btn-small {
++        padding: 7px 12px;
++    }
++
++    .details-pending {
++        color: #a16207;
++        font-weight: 600;
++    }
++
++    .details-confirmed {
++        color: #15803d;
++        font-weight: 600;
++    }
++
++    .details-rejected {
++        color: #b91c1c;
++        font-weight: 600;
++    }
++
++    @media (max-width: 700px) {
++        .details-cards,
++        .details-grid {
++            grid-template-columns: 1fr;
++        }
++    }
++</style>
++
++<div class="app-layout">
++
++    <?php require __DIR__ . '/../partials/sidebar.php'; ?>
++
++    <main class="main-content details-page">
++
++        <!-- CABEÇALHO -->
++        <div class="page-header details-header">
++
++            <div>
++                <h1>
++                    <?= $esc($despesa['title']) ?>
++                </h1>
++
++                <p class="text-muted">
++                    Detalhes da despesa
++                    #<?= (int) $despesa['id'] ?>
++                </p>
++            </div>
++
++            <div class="details-actions">
++
++                <a href="/despesas">
++                    Voltar às despesas
++                </a>
++
++                <a href="/despesas/editar?id=<?= (int) $despesa['id'] ?>">
++                    Editar despesa
++                </a>
++
++            </div>
++
++        </div>
++
++        <!-- MENSAGENS DE SUCESSO -->
++        <?php if (
++            ($_GET['pagamento'] ?? '') === 'registrado'
++        ): ?>
++
++            <div class="details-notice" role="status">
++                Pagamento registrado!
++                Ele aguarda a confirmação de um administrador.
++            </div>
++
++        <?php elseif (
++            ($_GET['pagamento'] ?? '') === 'confirmado'
++        ): ?>
++
++            <div class="details-notice" role="status">
++                Pagamento confirmado!
++                Os totais foram atualizados.
++            </div>
++
++        <?php endif; ?>
++
++        <!-- RESUMO FINANCEIRO -->
++        <section
++            class="details-cards"
++            aria-label="Resumo financeiro"
++        >
++
++            <article class="card">
++
++                <span class="details-label">
++                    Valor total
++                </span>
++
++                <strong class="details-number">
++                    <?= $moeda($total) ?>
++                </strong>
++
++            </article>
++
++            <article class="card">
++
++                <span class="details-label">
++                    Total pago
++                </span>
++
++                <strong class="details-number status-success">
++                    <?= $moeda($totalPago) ?>
++                </strong>
++
++            </article>
++
++            <article class="card">
++
++                <span class="details-label">
++                    Falta pagar
++                </span>
++
++                <strong class="details-number status-danger">
++                    <?= $moeda($restante) ?>
++                </strong>
++
++            </article>
++
++        </section>
++
++        <!-- INFORMAÇÕES DA DESPESA -->
++        <section class="card details-section">
++
++            <h2>Informações da despesa</h2>
++
++            <div class="details-grid">
++
++                <div>
++                    <span class="details-label">
++                        Categoria
++                    </span>
++
++                    <strong>
++                        <?= $esc(
++                            $despesa['category_name']
++                            ?? 'Sem categoria'
++                        ) ?>
++                    </strong>
++                </div>
++
++                <div>
++                    <span class="details-label">
++                        Situação
++                    </span>
++
++                    <strong>
++                        <?= $esc($statusGeral) ?>
++                    </strong>
++                </div>
++
++                <div>
++                    <span class="details-label">
++                        Data da despesa
++                    </span>
++
++                    <strong>
++                        <?= $esc(
++                            $dataBR($despesa['expense_date'])
++                        ) ?>
++                    </strong>
++                </div>
++
++                <div>
++                    <span class="details-label">
++                        Vencimento
++                    </span>
++
++                    <strong>
++                        <?= $esc(
++                            $dataBR($despesa['due_date'])
++                        ) ?>
++                    </strong>
++                </div>
++
++                <div>
++                    <span class="details-label">
++                        Tipo de rateio
++                    </span>
++
++                    <strong>
++                        <?= $esc(
++                            $tipos[$despesa['split_type']]
++                            ?? 'Não informado'
++                        ) ?>
++                    </strong>
++                </div>
++
++                <div>
++                    <span class="details-label">
++                        Cadastrada por
++                    </span>
++
++                    <strong>
++                        <?= $esc($despesa['creator_name']) ?>
++                    </strong>
++                </div>
++
++            </div>
++
++            <?php if (
++                trim(
++                    (string) ($despesa['description'] ?? '')
++                ) !== ''
++            ): ?>
++
++                <div style="margin-top: 20px;">
++
++                    <span class="details-label">
++                        Descrição
++                    </span>
++
++                    <p class="details-description">
++                        <?= $esc($despesa['description']) ?>
++                    </p>
++
++                </div>
++
++            <?php endif; ?>
++
++        </section>
++
++        <!-- RATEIO ENTRE MORADORES -->
++        <section class="card details-section">
++
++            <h2>Quanto cada morador deve</h2>
++
++            <div class="details-table-wrap">
++
++                <table class="details-table">
++
++                    <thead>
++                        <tr>
++                            <th>Morador</th>
++                            <th>Parte</th>
++                            <th>Valor devido</th>
++                            <th>Pago</th>
++                            <th>Falta</th>
++                        </tr>
++                    </thead>
++
++                    <tbody>
++
++                        <?php foreach ($rateios as $parte): ?>
++
++                            <tr>
++
++                                <td>
++                                    <?= $esc($parte['member_name']) ?>
++                                </td>
++
++                                <td>
++                                    <?php if (
++                                        $despesa['split_type']
++                                            === 'percentage'
++                                        &&
++                                        $parte['percentage'] !== null
++                                    ): ?>
++
++                                        <?= $esc(
++                                            number_format(
++                                                (float) $parte['percentage'],
++                                                2,
++                                                ',',
++                                                '.'
++                                            ) . '%'
++                                        ) ?>
++
++                                    <?php else: ?>
++                                        —
++                                    <?php endif; ?>
++                                </td>
++
++                                <td>
++                                    <?= $moeda($parte['amount_due']) ?>
++                                </td>
++
++                                <td>
++                                    <?= $moeda($parte['paid_amount']) ?>
++                                </td>
++
++                                <td>
++                                    <?= $moeda($parte['remaining_amount']) ?>
++                                </td>
++
++                            </tr>
++
++                        <?php endforeach; ?>
++
++                    </tbody>
++
++                </table>
++
++            </div>
++
++        </section>
++
++        <!-- REGISTRAR PAGAMENTO -->
++        <section class="card details-section">
++
++            <h2>Registrar pagamento</h2>
++
++            <p class="details-note">
++                Informe quanto foi pago.
++                O comprovante em PDF, JPG ou PNG é opcional
++                (até 5 MB).
++            </p>
++
++            <p class="details-note">
++                O valor só aparecerá em "Total pago"
++                após a confirmação pelo administrador.
++            </p>
++
++            <div class="details-payment-list">
++
++                <?php $algumFormulario = false; ?>
++
++                <?php foreach ($rateios as $parte): ?>
++
++                    <?php
++
++                    $podeRegistrar = $ehAdmin
++                        ||
++                        (int) $parte['member_id'] === $membroId;
++
++                    $parteId = (int) $parte['share_id'];
++
++                    $devidoCentavos =
++                        \App\Services\ExpenseRateio::centavos(
++                            (string) $parte['amount_due']
++                        );
++
++                    $disponivel = max(
++                        0,
++                        $devidoCentavos
++                        -
++                        ($comprometidoPorParte[$parteId] ?? 0)
++                    );
++
++                    $estaPago =
++                        $parte['share_status'] === 'paid';
++
++                    ?>
++
++                    <?php if ($podeRegistrar): ?>
++
++                        <?php $algumFormulario = true; ?>
++
++                        <div class="details-payment-item">
++
++                            <h3>
++                                <?= $esc($parte['member_name']) ?>
++                            </h3>
++
++                            <p>
++                                Valor devido:
++                                <strong>
++                                    <?= $moeda($parte['amount_due']) ?>
++                                </strong>
++                            </p>
++
++                            <p>
++                                Já confirmado:
++                                <strong>
++                                    <?= $moeda($parte['paid_amount']) ?>
++                                </strong>
++                            </p>
++
++                            <p>
++                                Disponível para registrar:
++                                <strong>
++                                    <?= $moeda($disponivel / 100) ?>
++                                </strong>
++                            </p>
++
++                            <?php if (
++                                !$estaPago &&
++                                $disponivel > 0
++                            ): ?>
++
++                                <form
++                                    class="details-form"
++                                    action="/despesas/pagamento"
++                                    method="post"
++                                    enctype="multipart/form-data"
++                                >
++
++                                    <input
++                                        type="hidden"
++                                        name="_csrf"
++                                        value="<?= $esc($csrf) ?>"
++                                    >
++
++                                    <input
++                                        type="hidden"
++                                        name="share_id"
++                                        value="<?= $parteId ?>"
++                                    >
++
++                                    <div class="details-field">
++
++                                        <label for="valor-<?= $parteId ?>">
++                                            Valor pago (R$)
++                                        </label>
++
++                                        <input
++                                            id="valor-<?= $parteId ?>"
++                                            type="number"
++                                            name="amount"
++                                            min="0.01"
++                                            max="<?= $esc(
++                                                number_format(
++                                                    $disponivel / 100,
++                                                    2,
++                                                    '.',
++                                                    ''
++                                                )
++                                            ) ?>"
++                                            step="0.01"
++                                            value="<?= $esc(
++                                                number_format(
++                                                    $disponivel / 100,
++                                                    2,
++                                                    '.',
++                                                    ''
++                                                )
++                                            ) ?>"
++                                            required
++                                        >
++
++                                    </div>
++
++                                    <div class="details-field">
++
++                                        <label for="prova-<?= $parteId ?>">
++                                            Comprovante (opcional)
++                                        </label>
++
++                                        <input
++                                            id="prova-<?= $parteId ?>"
++                                            type="file"
++                                            name="proof"
++                                            accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
++                                        >
++
++                                    </div>
++
++                                    <button
++                                        class="details-btn"
++                                        type="submit"
++                                    >
++                                        Registrar pagamento
++                                    </button>
++
++                                </form>
++
++                            <?php elseif ($estaPago): ?>
++
++                                <p class="details-confirmed">
++                                    Parte quitada.
++                                </p>
++
++                            <?php else: ?>
++
++                                <p class="details-pending">
++                                    O restante já está registrado
++                                    e aguarda confirmação.
++                                </p>
++
++                            <?php endif; ?>
++
++                        </div>
++
++                    <?php endif; ?>
++
++                <?php endforeach; ?>
++
++                <?php if (!$algumFormulario): ?>
++
++                    <p class="details-note">
++                        Você não possui uma parte desta despesa
++                        para registrar.
++
++                        Somente o morador responsável ou
++                        um administrador pode fazer o registro.
++                    </p>
++
++                <?php endif; ?>
++
++            </div>
++
++        </section>
++
++        <!-- HISTÓRICO DE PAGAMENTOS -->
++        <section class="card details-section">
++
++            <h2>Histórico de pagamentos</h2>
++
++            <?php if (!$pagamentos): ?>
++
++                <p class="details-note">
++                    Nenhum pagamento registrado até o momento.
++                </p>
++
++            <?php else: ?>
++
++                <div class="details-table-wrap">
++
++                    <table class="details-table">
++
++                        <thead>
++                            <tr>
++                                <th>Morador</th>
++                                <th>Valor</th>
++                                <th>Data</th>
++                                <th>Status</th>
++                                <th>Comprovante</th>
++
++                                <?php if ($ehAdmin): ?>
++                                    <th>Ação</th>
++                                <?php endif; ?>
++                            </tr>
++                        </thead>
++
++                        <tbody>
++
++                            <?php foreach ($pagamentos as $pagamento): ?>
++
++                                <?php
++
++                                $statusPagamento = [
++                                    'pending' => 'Aguardando confirmação',
++                                    'confirmed' => 'Confirmado',
++                                    'rejected' => 'Rejeitado',
++                                ][$pagamento['status']] ?? 'Desconhecido';
++
++                                ?>
++
++                                <tr>
++
++                                    <td>
++                                        <?= $esc(
++                                            $pagamento['member_name']
++                                        ) ?>
++                                    </td>
++
++                                    <td>
++                                        <?= $moeda(
++                                            $pagamento['amount']
++                                        ) ?>
++                                    </td>
++
++                                    <td>
++                                        <?= $esc(
++                                            $dataBR(
++                                                $pagamento['payment_date']
++                                            )
++                                        ) ?>
++                                    </td>
++
++                                    <td
++                                        class="<?= $pagamento['status'] === 'confirmed'
++                                            ? 'details-confirmed'
++                                            : (
++                                                $pagamento['status'] === 'rejected'
++                                                ? 'details-rejected'
++                                                : 'details-pending'
++                                            ) ?>"
++                                    >
++                                        <?= $esc($statusPagamento) ?>
++                                    </td>
++
++                                    <td>
++
++                                        <?php if (
++                                            !empty(
++                                                $pagamento['proof_path']
++                                            )
++                                        ): ?>
++
++                                            <a
++                                                class="details-link"
++                                                href="/despesas/comprovante?id=<?= (int) $pagamento['id'] ?>"
++                                            >
++                                                Baixar comprovante
++                                            </a>
++
++                                        <?php else: ?>
++                                            Não enviado
++                                        <?php endif; ?>
++
++                                    </td>
++
++                                    <?php if ($ehAdmin): ?>
++
++                                        <td>
++
++                                            <?php if (
++                                                $pagamento['status'] === 'pending'
++                                            ): ?>
++
++                                                <form
++                                                    action="/despesas/pagamento/confirmar"
++                                                    method="post"
++                                                >
++
++                                                    <input
++                                                        type="hidden"
++                                                        name="_csrf"
++                                                        value="<?= $esc($csrf) ?>"
++                                                    >
++
++                                                    <input
++                                                        type="hidden"
++                                                        name="payment_id"
++                                                        value="<?= (int) $pagamento['id'] ?>"
++                                                    >
++
++                                                    <button
++                                                        class="details-btn details-btn-small"
++                                                        type="submit"
++                                                    >
++                                                        Confirmar
++                                                    </button>
++
++                                                </form>
++
++                                            <?php else: ?>
++                                                —
++                                            <?php endif; ?>
++
++                                        </td>
++
++                                    <?php endif; ?>
++
++                                </tr>
++
++                            <?php endforeach; ?>
++
++                        </tbody>
++
++                    </table>
++
++                </div>
++
++            <?php endif; ?>
++
++        </section>
++
++    </main>
++
++</div>
++
++<?php require __DIR__ . '/../partials/footer.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/app/Views/partials/sidebar.php /mnt/data/integracao_rep/stage2/app/Views/partials/sidebar.php
+--- /mnt/data/integracao_rep/base/app/Views/partials/sidebar.php	2026-11-15 00:21:22.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/app/Views/partials/sidebar.php	2026-11-15 01:33:25.832980145 +0000
+@@ -37,7 +37,7 @@
+             Dashboard
+         </a>
+ 
+-        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="#">
++        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="/despesas">
+             Despesas
+         </a>
+ 
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/base/routes/web.php /mnt/data/integracao_rep/stage2/routes/web.php
+--- /mnt/data/integracao_rep/base/routes/web.php	2026-11-15 00:21:22.000000000 +0000
++++ /mnt/data/integracao_rep/stage2/routes/web.php	2026-11-15 01:33:25.832828584 +0000
+@@ -2,6 +2,10 @@
+ 
+ use App\Controllers\AuthController;
+ use App\Controllers\DashboardController;
++use App\Controllers\ExpenseController;
++use App\Controllers\ExpenseDetailsController;
++use App\Controllers\ExpenseEditController;
++use App\Controllers\ExpensePaymentController;
+ use App\Controllers\MemberController;
+ use App\Controllers\ProfileController;
+ use App\Controllers\RepublicController;
+@@ -18,6 +22,42 @@
+             ->index();
+     },
+ 
++    'GET /despesas' => function (): void {
++        (new ExpenseController())->index();
++    },
++
++    'GET /despesas/nova' => function (): void {
++        (new ExpenseController())->create();
++    },
++
++    'POST /despesas/nova' => function (): void {
++        (new ExpenseController())->store();
++    },
++
++    'GET /despesas/editar' => function (): void {
++        (new ExpenseEditController())->edit();
++    },
++
++    'POST /despesas/editar' => function (): void {
++        (new ExpenseEditController())->edit();
++    },
++
++    'GET /despesas/detalhes' => function (): void {
++        (new ExpenseDetailsController())->show();
++    },
++
++    'POST /despesas/pagamento' => function (): void {
++        (new ExpensePaymentController())->store();
++    },
++
++    'POST /despesas/pagamento/confirmar' => function (): void {
++        (new ExpensePaymentController())->confirm();
++    },
++
++    'GET /despesas/comprovante' => function (): void {
++        (new ExpensePaymentController())->proof();
++    },
++
+     'GET /cadastro' => function (): void {
+         (new AuthController())
+             ->showRegister();

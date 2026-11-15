@@ -1,0 +1,1178 @@
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/.gitignore /mnt/data/integracao_rep/stage3/.gitignore
+--- /mnt/data/integracao_rep/stage2/.gitignore	2026-11-15 01:33:38.837462094 +0000
++++ /mnt/data/integracao_rep/stage3/.gitignore	2026-11-15 01:34:40.587662836 +0000
+@@ -17,3 +17,4 @@
+ # Comprovantes de pagamento (arquivos gerados em execução)
+ /storage/payment-proofs/*
+ !/storage/payment-proofs/.gitkeep
++/.local/
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Controllers/FinanceController.php /mnt/data/integracao_rep/stage3/app/Controllers/FinanceController.php
+--- /mnt/data/integracao_rep/stage2/app/Controllers/FinanceController.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Controllers/FinanceController.php	2026-11-15 01:34:39.706000279 +0000
+@@ -0,0 +1,193 @@
++<?php
++
++declare(strict_types=1);
++
++namespace App\Controllers;
++
++use App\Core\Database;
++use App\Core\Session;
++use App\Services\FinanceInput;
++use App\Services\FinanceService;
++use DateTimeImmutable;
++use InvalidArgumentException;
++use Throwable;
++
++final class FinanceController
++{
++    private FinanceService $service;
++    private array $user;
++    private ?array $republic;
++
++    public function handle(string $action): void
++    {
++        $user = Session::get('user');
++        if (!is_array($user) || empty($user['id'])) {
++            header('Location: /login', true, 302);
++            return;
++        }
++        $this->user = $user;
++        header('Cache-Control: no-store');
++        header('X-Content-Type-Options: nosniff');
++        try {
++            $this->service = new FinanceService(Database::connection());
++            $this->republic = $this->service->context((int) $user['id']);
++            if ($this->republic === null) {
++                $this->error('Sua conta não tem vínculo ativo com uma república. Peça ao administrador do grupo para conferir seu cadastro.', 403);
++                return;
++            }
++            if ($action === 'store') {
++                $this->store();
++            } elseif ($action === 'export') {
++                $this->export();
++            } else {
++                $this->screen($action);
++            }
++        } catch (InvalidArgumentException $error) {
++            $this->error($error->getMessage(), 422);
++        } catch (Throwable $error) {
++            error_log('[Financeiro] ' . (string) $error);
++            $this->error('Não foi possível concluir a operação. Tente novamente. Se o problema persistir, avise o responsável pelo sistema.', 500);
++        }
++    }
++
++    private function period(): array
++    {
++        return FinanceInput::month($_GET['month'] ?? date('Y-m'));
++    }
++
++    private function screen(string $screen, array $errors = [], array $old = []): void
++    {
++        [$month, $start, $end] = $this->period();
++        $republic = $this->republic;
++        $id = (int) $republic['id'];
++        $cash = $this->service->cashSummary($id, $start, $end);
++        $expenses = $this->service->expenses($id, $start, $end);
++        $totals = ['total' => array_sum(array_column($expenses, 'total')), 'paid' => array_sum(array_column($expenses, 'paid')),
++            'pending' => array_sum(array_column($expenses, 'pending'))];
++        $categories = [];
++        foreach ($expenses as $expense) {
++            $categories[$expense['category']] = ($categories[$expense['category']] ?? 0) + $expense['total'];
++        }
++        arsort($categories);
++        $cashRows = [];
++        $residents = [];
++        $pending = [];
++        $history = [];
++        if ($screen === 'dashboard') {
++            $all = $this->service->expenses($id);
++            $pending = array_values(array_filter($all, fn($expense) => $expense['pending'] > 0));
++            usort($pending, fn($a, $b) => ($a['due_date'] ?? '9999-12-31') <=> ($b['due_date'] ?? '9999-12-31'));
++            $allPending = array_sum(array_column($pending, 'pending'));
++            $cursor = new DateTimeImmutable($start);
++            for ($i = 5; $i >= 0; $i--) {
++                $history[$cursor->modify("-$i months")->format('Y-m')] = 0;
++            }
++            foreach ($all as $expense) {
++                $key = substr($expense['expense_date'], 0, 7);
++                if (array_key_exists($key, $history)) {
++                    $history[$key] += $expense['total'];
++                }
++            }
++        } else {
++            $cashRows = $this->service->cashRows($id, $start, $end);
++            $running = $cash['opening'];
++            foreach ($cashRows as &$cashRow) {
++                $running += $cashRow['type'] === 'income' ? $cashRow['cents'] : -$cashRow['cents'];
++                $cashRow['balance'] = $running;
++            }
++            unset($cashRow);
++            if ($screen === 'reports') {
++                $residents = $this->service->residentTotals($id, $start, $end);
++            }
++        }
++        if (!Session::has('finance_csrf')) {
++            Session::set('finance_csrf', bin2hex(random_bytes(32)));
++        }
++        if (!Session::has('finance_submission')) {
++            Session::set('finance_submission', bin2hex(random_bytes(32)));
++        }
++        $csrf = Session::get('finance_csrf');
++        $submission = Session::get('finance_submission');
++        $currentPage = ['dashboard' => 'dashboard', 'cash' => 'cash', 'reports' => 'reports'][$screen];
++        $title = ['dashboard' => 'Dashboard', 'cash' => 'Caixa da reserva', 'reports' => 'Relatórios'][$screen];
++        $pageTitle = $title . ' - RepubliCAIXA';
++        $user = $this->user;
++        $isAdmin = $republic['role'] === 'admin';
++        $notice = Session::get('finance_notice');
++        Session::remove('finance_notice');
++        $e = static fn($value) => htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
++        $money = [FinanceInput::class, 'money'];
++        $date = static fn($day) => $day ? implode('/', array_reverse(explode('-', $day))) : 'Sem vencimento';
++        require dirname(__DIR__) . '/Views/finance/' . $screen . '.php';
++    }
++
++    private function store(): void
++    {
++        if ($this->republic['role'] !== 'admin') {
++            $this->error('Apenas administradores podem registrar movimentos na reserva.', 403);
++            return;
++        }
++        $token = $_POST['_csrf'] ?? null;
++        if (!is_string($token) || !Session::has('finance_csrf') || !hash_equals(Session::get('finance_csrf'), $token)) {
++            $this->error('Formulário expirado ou inválido. Abra o Caixa novamente e tente outra vez.', 403);
++            return;
++        }
++        $submission = $_POST['_submission'] ?? null;
++        if (!is_string($submission) || !Session::has('finance_submission') || !hash_equals(Session::get('finance_submission'), $submission)) {
++            $this->error('Este formulário já foi utilizado ou ficou desatualizado. Confira o histórico antes de fazer outro lançamento.', 409);
++            return;
++        }
++        try {
++            $movement = FinanceInput::transaction($_POST);
++            $this->service->addCash((int) $this->republic['id'], (int) $this->user['id'], $movement);
++        } catch (InvalidArgumentException $error) {
++            http_response_code(422);
++            $old = array_filter($_POST, 'is_string');
++            $this->screen('cash', [$error->getMessage()], $old);
++            return;
++        }
++        Session::set('finance_submission', bin2hex(random_bytes(32)));
++        Session::set('finance_notice', 'Movimento registrado na reserva.');
++        header('Location: /caixa?month=' . substr($movement['day'], 0, 7), true, 303);
++    }
++
++    private function export(): void
++    {
++        [$month, $start, $end] = $this->period();
++        $type = FinanceInput::text($_GET['tipo'] ?? '');
++        if (!in_array($type, ['caixa', 'despesas'], true)) {
++            throw new InvalidArgumentException('Selecione um relatório válido.');
++        }
++        $id = (int) $this->republic['id'];
++        $rows = $type === 'caixa' ? $this->service->cashRows($id, $start, $end) : $this->service->expenses($id, $start, $end);
++        header('Content-Type: text/csv; charset=UTF-8');
++        header('Content-Disposition: attachment; filename="republicaixa-' . $type . '-' . $month . '.csv"');
++        $output = fopen('php://output', 'wb');
++        fwrite($output, "\xEF\xBB\xBF");
++        $write = static function (array $row) use ($output): void {
++            fputcsv($output, array_map(fn($cell) => FinanceInput::csvText((string) $cell), $row), ';', '"', '');
++        };
++        if ($type === 'caixa') {
++            $write(['Data', 'Tipo', 'Descrição', 'Valor (R$)', 'Registrado por']);
++            foreach ($rows as $row) {
++                $write([$row['transaction_date'], $row['type'] === 'income' ? 'Entrada' : 'Saída', $row['description'],
++                    str_replace('.', ',', FinanceInput::decimal($row['cents'])), $row['author']]);
++            }
++        } else {
++            $write(['Data da despesa', 'Vencimento', 'Título', 'Categoria', 'Total (R$)', 'Quitado das parcelas (R$)', 'Pendente (R$)']);
++            foreach ($rows as $row) {
++                $write([$row['expense_date'], $row['due_date'] ?? '', $row['title'], $row['category'],
++                    str_replace('.', ',', FinanceInput::decimal($row['total'])), str_replace('.', ',', FinanceInput::decimal($row['paid'])),
++                    str_replace('.', ',', FinanceInput::decimal($row['pending']))]);
++            }
++        }
++        fclose($output);
++    }
++
++    private function error(string $message, int $status): void
++    {
++        http_response_code($status);
++        $pageTitle = 'Aviso - RepubliCAIXA';
++        require dirname(__DIR__) . '/Views/finance/error.php';
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Services/FinanceInput.php /mnt/data/integracao_rep/stage3/app/Services/FinanceInput.php
+--- /mnt/data/integracao_rep/stage2/app/Services/FinanceInput.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Services/FinanceInput.php	2026-11-15 01:34:39.710853321 +0000
+@@ -0,0 +1,78 @@
++<?php
++
++declare(strict_types=1);
++
++namespace App\Services;
++
++use DateTimeImmutable;
++use InvalidArgumentException;
++
++final class FinanceInput
++{
++    public static function text(mixed $value): string
++    {
++        if (!is_string($value)) {
++            throw new InvalidArgumentException('Formato de campo inválido.');
++        }
++        return trim($value);
++    }
++
++    public static function month(mixed $value): array
++    {
++        $month = self::text($value);
++        if (!preg_match('/\A(?:20\d{2}|2100)-(?:0[1-9]|1[0-2])\z/', $month)) {
++            throw new InvalidArgumentException('Selecione um mês entre 2000 e 2100.');
++        }
++        $date = new DateTimeImmutable($month . '-01');
++        return [$month, $date->format('Y-m-d'), $date->modify('+1 month')->format('Y-m-d')];
++    }
++
++    public static function transaction(array $input): array
++    {
++        $type = self::text($input['type'] ?? '');
++        if (!in_array($type, ['income', 'expense'], true)) {
++            throw new InvalidArgumentException('Selecione entrada ou saída.');
++        }
++        $amount = ExpenseRateio::centavos(self::text($input['amount'] ?? ''));
++        if ($amount <= 0) {
++            throw new InvalidArgumentException('Informe um valor maior que zero.');
++        }
++        $description = self::text($input['description'] ?? '');
++        if (mb_strlen($description, 'UTF-8') < 3 || mb_strlen($description, 'UTF-8') > 255) {
++            throw new InvalidArgumentException('A descrição deve ter entre 3 e 255 caracteres.');
++        }
++        $day = self::text($input['transaction_date'] ?? '');
++        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $day);
++        if (!$date || $date->format('Y-m-d') !== $day || $day < '2000-01-01' || $day > date('Y-m-d')) {
++            throw new InvalidArgumentException('Informe uma data válida, a partir de 2000 e até hoje. Registre apenas movimentos realizados.');
++        }
++        return compact('type', 'amount', 'description', 'day');
++    }
++
++    // Valores DECIMAL do banco são strings; todos os cálculos monetários usam inteiros.
++    public static function cents(string $decimal): int
++    {
++        if (!preg_match('/\A(-?)(\d{1,14})(?:\.(\d{1,2}))?\z/', $decimal, $parts)) {
++            throw new InvalidArgumentException('Valor monetário inválido no banco.');
++        }
++        $cents = (int) $parts[2] * 100 + (int) str_pad($parts[3] ?? '', 2, '0');
++        return ($parts[1] === '-' ? -1 : 1) * $cents;
++    }
++
++    public static function decimal(int $cents): string
++    {
++        return ($cents < 0 ? '-' : '') . intdiv(abs($cents), 100) . '.' . str_pad((string) (abs($cents) % 100), 2, '0', STR_PAD_LEFT);
++    }
++
++    public static function money(int $cents): string
++    {
++        $integer = preg_replace('/\B(?=(\d{3})+(?!\d))/', '.', (string) intdiv(abs($cents), 100));
++        return ($cents < 0 ? '- ' : '') . 'R$ ' . $integer . ',' . str_pad((string) (abs($cents) % 100), 2, '0', STR_PAD_LEFT);
++    }
++
++    public static function csvText(string $text): string
++    {
++        // Evita fórmulas ao abrir texto controlado pelo usuário em planilhas.
++        return preg_match('/\A[\s\x{FEFF}]*[=+@-]/u', $text) ? "'" . $text : $text;
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Services/FinanceService.php /mnt/data/integracao_rep/stage3/app/Services/FinanceService.php
+--- /mnt/data/integracao_rep/stage2/app/Services/FinanceService.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Services/FinanceService.php	2026-11-15 01:34:39.713373022 +0000
+@@ -0,0 +1,153 @@
++<?php
++
++declare(strict_types=1);
++
++namespace App\Services;
++
++use InvalidArgumentException;
++use PDO;
++use Throwable;
++
++final class FinanceService
++{
++    public function __construct(private PDO $db) {}
++
++    public function context(int $userId): ?array
++    {
++        // Mesma república utilizada pelo módulo de despesas: primeira ativa por ID.
++        $query = $this->db->prepare('SELECT r.id, r.name, rm.role, rm.id AS member_id
++            FROM republic_members rm JOIN republics r ON r.id = rm.republic_id
++            JOIN users u ON u.id = rm.user_id
++            WHERE rm.user_id = :user AND rm.active = 1 AND r.active = 1 AND u.active = 1
++            ORDER BY r.id LIMIT 1');
++        $query->execute(['user' => $userId]);
++        return $query->fetch() ?: null;
++    }
++
++    public function cashSummary(int $republic, string $start, string $end): array
++    {
++        $query = $this->db->prepare("SELECT
++            COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) balance,
++            COALESCE(SUM(CASE WHEN transaction_date < :opening THEN CASE WHEN type = 'income' THEN amount ELSE -amount END ELSE 0 END), 0) opening,
++            COALESCE(SUM(CASE WHEN transaction_date >= :income_start AND transaction_date < :income_end AND type = 'income' THEN amount ELSE 0 END), 0) income,
++            COALESCE(SUM(CASE WHEN transaction_date >= :expense_start AND transaction_date < :expense_end AND type = 'expense' THEN amount ELSE 0 END), 0) expense
++            FROM cash_transactions WHERE republic_id = :republic");
++        $query->execute(['opening' => $start, 'income_start' => $start, 'income_end' => $end,
++            'expense_start' => $start, 'expense_end' => $end, 'republic' => $republic]);
++        $result = array_map(fn($value) => FinanceInput::cents((string) $value), $query->fetch());
++        $result['closing'] = $result['opening'] + $result['income'] - $result['expense'];
++        return $result;
++    }
++
++    public function cashRows(int $republic, string $start, string $end): array
++    {
++        $query = $this->db->prepare('SELECT c.id, c.type, c.amount, c.description, c.transaction_date, u.name AS author
++            FROM cash_transactions c JOIN users u ON u.id = c.created_by
++            WHERE c.republic_id = :republic AND c.transaction_date >= :start AND c.transaction_date < :end
++            ORDER BY c.transaction_date, c.id');
++        $query->execute(['republic' => $republic, 'start' => $start, 'end' => $end]);
++        $rows = $query->fetchAll();
++        foreach ($rows as &$row) {
++            $row['cents'] = FinanceInput::cents($row['amount']);
++        }
++        return $rows;
++    }
++
++    public function addCash(int $republic, int $userId, array $movement): int
++    {
++        $this->db->beginTransaction();
++        try {
++            // Serializa os lançamentos da república, inclusive quando o caixa está vazio.
++            $lock = $this->db->prepare('SELECT id FROM republics WHERE id = :id AND active = 1 FOR UPDATE');
++            $lock->execute(['id' => $republic]);
++            if (!$lock->fetchColumn()) {
++                throw new InvalidArgumentException('República indisponível.');
++            }
++            $permission = $this->db->prepare("SELECT rm.id FROM republic_members rm JOIN users u ON u.id = rm.user_id
++                WHERE rm.republic_id = :republic AND rm.user_id = :user AND rm.active = 1
++                AND rm.role = 'admin' AND u.active = 1 FOR UPDATE");
++            $permission->execute(['republic' => $republic, 'user' => $userId]);
++            if (!$permission->fetchColumn()) {
++                throw new InvalidArgumentException('Apenas administradores ativos podem movimentar a reserva.');
++            }
++            $insert = $this->db->prepare('INSERT INTO cash_transactions
++                (republic_id, created_by, type, amount, description, transaction_date)
++                VALUES (:republic, :user, :type, :amount, :description, :day)');
++            $insert->execute(['republic' => $republic, 'user' => $userId, 'type' => $movement['type'],
++                'amount' => FinanceInput::decimal($movement['amount']), 'description' => $movement['description'], 'day' => $movement['day']]);
++            $id = (int) $this->db->lastInsertId();
++
++            // Uma saída retroativa também não pode tornar negativo um saldo histórico.
++            $history = $this->db->prepare('SELECT type, amount FROM cash_transactions
++                WHERE republic_id = :republic ORDER BY transaction_date, id FOR UPDATE');
++            $history->execute(['republic' => $republic]);
++            $balance = 0;
++            while ($row = $history->fetch()) {
++                $amount = FinanceInput::cents($row['amount']);
++                $balance += $row['type'] === 'income' ? $amount : -$amount;
++                if ($balance < 0) {
++                    throw new InvalidArgumentException('Saldo insuficiente. O movimento deixaria a reserva negativa nessa data ou em uma data posterior.');
++                }
++            }
++            $this->db->commit();
++            return $id;
++        } catch (Throwable $error) {
++            if ($this->db->inTransaction()) {
++                $this->db->rollBack();
++            }
++            throw $error;
++        }
++    }
++
++    public function expenses(int $republic, ?string $start = null, ?string $end = null): array
++    {
++        // Agrega pagamentos por parcela antes de juntar às despesas: evita multiplicar totais.
++        // status=paid preserva a compatibilidade com parcelas quitadas pela base recebida.
++        $sql = "SELECT e.id, e.title, e.expense_date, e.due_date, e.total_amount,
++            COALESCE(c.name, 'Sem categoria') AS category,
++            COALESCE(SUM(LEAST(s.amount_due, GREATEST(0,
++                CASE WHEN s.status = 'paid' THEN s.amount_due ELSE COALESCE(p.confirmed, 0) END))), 0) AS paid
++            FROM expenses e LEFT JOIN expense_categories c ON c.id = e.category_id
++            LEFT JOIN expense_shares s ON s.expense_id = e.id
++            LEFT JOIN (SELECT expense_share_id, SUM(amount) confirmed FROM payments
++                WHERE status = 'confirmed' GROUP BY expense_share_id) p ON p.expense_share_id = s.id
++            WHERE e.republic_id = :republic";
++        $params = ['republic' => $republic];
++        if ($start !== null && $end !== null) {
++            $sql .= ' AND e.expense_date >= :start AND e.expense_date < :end';
++            $params += ['start' => $start, 'end' => $end];
++        }
++        $sql .= ' GROUP BY e.id, e.title, e.expense_date, e.due_date, e.total_amount, c.name ORDER BY e.expense_date, e.id';
++        $query = $this->db->prepare($sql);
++        $query->execute($params);
++        $rows = $query->fetchAll();
++        foreach ($rows as &$row) {
++            $row['total'] = FinanceInput::cents($row['total_amount']);
++            $row['paid'] = min($row['total'], max(0, FinanceInput::cents($row['paid'])));
++            $row['pending'] = max(0, $row['total'] - $row['paid']);
++        }
++        return $rows;
++    }
++
++    public function residentTotals(int $republic, string $start, string $end): array
++    {
++        $query = $this->db->prepare("SELECT u.name, rm.id AS member_id,
++            SUM(s.amount_due) total,
++            SUM(LEAST(s.amount_due, GREATEST(0, CASE WHEN s.status = 'paid' THEN s.amount_due ELSE COALESCE(p.confirmed, 0) END))) paid
++            FROM expense_shares s JOIN expenses e ON e.id = s.expense_id
++            JOIN republic_members rm ON rm.id = s.member_id JOIN users u ON u.id = rm.user_id
++            LEFT JOIN (SELECT expense_share_id, SUM(amount) confirmed FROM payments
++                WHERE status = 'confirmed' GROUP BY expense_share_id) p ON p.expense_share_id = s.id
++            WHERE e.republic_id = :republic AND rm.republic_id = :membership_republic
++            AND e.expense_date >= :start AND e.expense_date < :end
++            GROUP BY rm.id, u.name ORDER BY u.name, rm.id");
++        $query->execute(['republic' => $republic, 'membership_republic' => $republic, 'start' => $start, 'end' => $end]);
++        $rows = $query->fetchAll();
++        foreach ($rows as &$row) {
++            $row['total'] = FinanceInput::cents($row['total']);
++            $row['paid'] = FinanceInput::cents($row['paid']);
++            $row['pending'] = $row['total'] - $row['paid'];
++        }
++        return $rows;
++    }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/cash-table.php /mnt/data/integracao_rep/stage3/app/Views/finance/cash-table.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/cash-table.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/cash-table.php	2026-11-15 01:34:39.717026034 +0000
+@@ -0,0 +1,6 @@
++<?php if (!$cashRows): ?><p class="text-muted">Nenhum movimento de reserva neste mês.</p><?php else: ?>
++<div class="finance-table-wrap" tabindex="0" role="region" aria-label="Extrato de entradas e saídas da reserva">
++<table><caption class="finance-sr">Movimentos em ordem de data e número do lançamento.</caption><thead><tr><th scope="col">Nº / Data</th><th scope="col">Descrição</th><th scope="col">Tipo</th><th scope="col">Valor</th><th scope="col">Saldo após movimento</th><th scope="col">Registrado por</th></tr></thead><tbody>
++<?php foreach ($cashRows as $row): ?><tr><td>#<?= (int) $row['id'] ?><br><?= $e($date($row['transaction_date'])) ?></td><td><?= $e($row['description']) ?></td><td><?= $row['type'] === 'income' ? 'Entrada' : 'Saída' ?></td><td class="<?= $row['type'] === 'income' ? 'finance-income' : 'finance-expense' ?>"><?= $money($row['cents']) ?></td><td><?= $money($row['balance']) ?></td><td><?= $e($row['author']) ?></td></tr><?php endforeach; ?>
++</tbody></table></div>
++<?php endif; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/cash.php /mnt/data/integracao_rep/stage3/app/Views/finance/cash.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/cash.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/cash.php	2026-11-15 01:34:39.717082084 +0000
+@@ -0,0 +1,28 @@
++<?php require __DIR__ . '/start.php'; ?>
++<p class="finance-note">Fundo de reserva para contribuições, consertos e compras coletivas. Pagar uma parcela de despesa não gera entrada automática aqui.</p>
++<section class="card-grid finance-cards" aria-label="Resumo da reserva">
++    <article class="card"><h2 class="card-label">Saldo atual da reserva</h2><strong class="card-value"><?= $money($cash['balance']) ?></strong><p class="text-muted">Todos os movimentos registrados.</p></article>
++    <article class="card"><h2 class="card-label">Entradas no mês</h2><strong class="card-value finance-income"><?= $money($cash['income']) ?></strong></article>
++    <article class="card"><h2 class="card-label">Saídas no mês</h2><strong class="card-value finance-expense"><?= $money($cash['expense']) ?></strong></article>
++</section>
++<?php if ($isAdmin): ?>
++<section class="card finance-section"><h2>Registrar movimento</h2>
++    <p class="text-muted" id="cash-help">Registre apenas valores já recebidos ou pagos. Um gasto coberto pela reserva não deve ser cobrado novamente no rateio.</p>
++    <form class="finance-form" action="/caixa?month=<?= $e($month) ?>" method="post" aria-describedby="cash-help">
++        <input type="hidden" name="_csrf" value="<?= $e($csrf) ?>">
++        <input type="hidden" name="_submission" value="<?= $e($submission) ?>">
++        <div class="form-group"><label for="cash-type">Tipo</label><select id="cash-type" name="type" required><option value="income" <?= ($old['type'] ?? '') === 'income' ? 'selected' : '' ?>>Entrada na reserva</option><option value="expense" <?= ($old['type'] ?? '') === 'expense' ? 'selected' : '' ?>>Saída da reserva</option></select></div>
++        <div class="form-group"><label for="cash-amount">Valor (R$)</label><input id="cash-amount" name="amount" type="text" inputmode="decimal" maxlength="11" placeholder="Ex.: 50,00" value="<?= $e($old['amount'] ?? '') ?>" required aria-describedby="amount-help"><small id="amount-help">Use vírgula ou ponto para os centavos, sem separador de milhar.</small></div>
++        <div class="form-group"><label for="cash-date">Data do movimento</label><input id="cash-date" name="transaction_date" type="date" min="2000-01-01" max="<?= date('Y-m-d') ?>" value="<?= $e($old['transaction_date'] ?? date('Y-m-d')) ?>" required></div>
++        <div class="form-group finance-wide"><label for="cash-description">Descrição</label><input id="cash-description" name="description" minlength="3" maxlength="255" placeholder="Ex.: Contribuição de Ana para a reserva" value="<?= $e($old['description'] ?? '') ?>" required></div>
++        <div class="finance-wide"><button class="button button-primary" type="submit">Registrar movimento</button></div>
++    </form>
++    <p class="text-muted finance-help">O histórico preserva os lançamentos. Para corrigir um erro, registre um movimento de valor oposto e identifique o número original e o motivo na descrição.</p>
++</section>
++<?php else: ?><p class="finance-note">Você pode consultar a reserva. Apenas administradores registram entradas e saídas.</p><?php endif; ?>
++<section class="card finance-section"><h2>Extrato da reserva</h2>
++    <p>Saldo anterior ao mês: <strong><?= $money($cash['opening']) ?></strong> · Saldo ao fim do período: <strong><?= $money($cash['closing']) ?></strong></p>
++    <?php require __DIR__ . '/cash-table.php'; ?>
++    <a class="finance-link" href="/relatorios/exportar?tipo=caixa&amp;month=<?= $e($month) ?>">Baixar extrato do mês em CSV</a>
++</section>
++<?php require __DIR__ . '/end.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/dashboard.php /mnt/data/integracao_rep/stage3/app/Views/finance/dashboard.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/dashboard.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/dashboard.php	2026-11-15 01:34:39.717105693 +0000
+@@ -0,0 +1,35 @@
++<?php require __DIR__ . '/start.php'; ?>
++<p class="finance-note">A reserva guarda contribuições e gastos próprios. Os pagamentos das despesas rateadas são acompanhados separadamente.</p>
++<section class="card-grid finance-cards" aria-label="Indicadores financeiros">
++    <article class="card"><h2 class="card-label">Saldo atual da reserva</h2><strong class="card-value"><?= $money($cash['balance']) ?></strong><p class="text-muted">Acumulado de todos os movimentos.</p><a class="finance-link" href="/caixa?month=<?= $e($month) ?>">Consultar reserva →</a></article>
++    <article class="card"><h2 class="card-label">Despesas rateadas do mês</h2><strong class="card-value"><?= $money($totals['total']) ?></strong><p class="text-muted">Pela data da despesa informada no formulário.</p><a class="finance-link" href="/despesas">Consultar despesas →</a></article>
++    <article class="card"><h2 class="card-label">Pendências dos moradores</h2><strong class="card-value finance-warning"><?= $money($allPending) ?></strong><p class="text-muted">Todas as despesas, inclusive de outros meses. Pagamentos aguardando confirmação continuam pendentes.</p></article>
++</section>
++<div class="finance-grid">
++    <section class="card"><h2>Reserva no mês</h2><dl class="finance-statement">
++        <div><dt>Saldo anterior ao mês</dt><dd><?= $money($cash['opening']) ?></dd></div>
++        <div><dt>Entradas</dt><dd class="finance-income">+ <?= $money($cash['income']) ?></dd></div>
++        <div><dt>Saídas</dt><dd class="finance-expense">− <?= $money($cash['expense']) ?></dd></div>
++        <div class="finance-total"><dt>Saldo ao fim do período</dt><dd><?= $money($cash['closing']) ?></dd></div>
++    </dl><p class="text-muted">Considera os movimentos já registrados no mês selecionado.</p></section>
++    <section class="card"><h2>Despesas rateadas por categoria</h2>
++        <?php if (!$categories): ?><p class="text-muted">Nenhuma despesa rateada neste mês.</p><?php else: ?>
++        <ul class="finance-bars"><?php $maximum = max(1, ...array_values($categories)); foreach ($categories as $category => $amount): ?>
++            <li><div><span><?= $e($category) ?></span><strong><?= $money($amount) ?></strong></div><div class="finance-track" aria-hidden="true"><span style="width: <?= (int) round(100 * $amount / $maximum) ?>%"></span></div></li>
++        <?php endforeach; ?></ul><?php endif; ?>
++    </section>
++</div>
++<section class="card finance-section"><h2>Despesas rateadas nos últimos seis meses</h2>
++    <p class="text-muted">Até o mês de referência. Os gastos da reserva ficam no extrato separado.</p>
++    <ul class="finance-bars finance-history"><?php $maximum = max(1, ...array_values($history)); foreach ($history as $key => $amount): ?>
++        <li><div><span><?= $e(substr($key, 5, 2) . '/' . substr($key, 0, 4)) ?></span><strong><?= $money($amount) ?></strong></div><div class="finance-track" aria-hidden="true"><span style="width: <?= (int) round(100 * $amount / $maximum) ?>%"></span></div></li>
++    <?php endforeach; ?></ul>
++</section>
++<section class="card finance-section"><h2>Próximas pendências a conferir</h2>
++    <p class="text-muted">Até cinco despesas com parcelas em aberto, começando pelos vencimentos mais antigos.</p>
++    <?php if (!$pending): ?><p>Nenhuma pendência de rateio encontrada.</p><?php else: ?>
++    <div class="finance-table-wrap" tabindex="0" role="region" aria-label="Despesas com parcelas pendentes"><table><thead><tr><th scope="col">Despesa</th><th scope="col">Vencimento</th><th scope="col">Pendente</th><th scope="col">Consultar</th></tr></thead><tbody>
++    <?php foreach (array_slice($pending, 0, 5) as $expense): ?><tr><td><?= $e($expense['title']) ?></td><td><?= $e($date($expense['due_date'])) ?><?php if ($expense['due_date'] && $expense['due_date'] < date('Y-m-d')): ?> <span class="finance-badge">Vencida</span><?php endif; ?></td><td><?= $money($expense['pending']) ?></td><td><a class="finance-link" href="/despesas/detalhes?id=<?= (int) $expense['id'] ?>">Ver detalhes<span class="finance-sr"> de <?= $e($expense['title']) ?></span></a></td></tr><?php endforeach; ?>
++    </tbody></table></div><?php endif; ?>
++</section>
++<?php require __DIR__ . '/end.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/end.php /mnt/data/integracao_rep/stage3/app/Views/finance/end.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/end.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/end.php	2026-11-15 01:34:39.717137773 +0000
+@@ -0,0 +1,4 @@
++</main>
++</div>
++<script src="/assets/js/finance.js" defer></script>
++<?php require dirname(__DIR__) . '/partials/footer.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/error.php /mnt/data/integracao_rep/stage3/app/Views/finance/error.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/error.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/error.php	2026-11-15 01:34:39.717176341 +0000
+@@ -0,0 +1,3 @@
++<?php require dirname(__DIR__) . '/partials/header.php'; ?>
++<main class="centered-page"><section class="card error-card" role="alert"><h1>Não foi possível continuar</h1><p><?= htmlspecialchars($message, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p><a class="button button-primary" href="/caixa">Abrir Caixa</a> <a href="/login">Entrar novamente</a></section></main>
++<?php require dirname(__DIR__) . '/partials/footer.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/reports.php /mnt/data/integracao_rep/stage3/app/Views/finance/reports.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/reports.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/reports.php	2026-11-15 01:34:39.717327351 +0000
+@@ -0,0 +1,13 @@
++<?php require __DIR__ . '/start.php'; ?>
++<div class="finance-actions"><button class="button button-primary" type="button" id="finance-print">Imprimir / salvar PDF</button><a class="finance-link" href="/relatorios/exportar?tipo=despesas&amp;month=<?= $e($month) ?>">Baixar despesas em CSV</a><a class="finance-link" href="/relatorios/exportar?tipo=caixa&amp;month=<?= $e($month) ?>">Baixar reserva em CSV</a></div>
++<p class="finance-note">Referência: <?= $e(substr($month, 5, 2) . '/' . substr($month, 0, 4)) ?>. As despesas usam a data informada no cadastro. A quitação reflete a situação atual das parcelas dessas despesas, inclusive pagamentos confirmados depois do mês. A reserva usa a data de cada movimento.</p>
++<section class="card finance-section"><h2>Despesas rateadas do mês</h2><dl class="finance-statement"><div><dt>Total das despesas</dt><dd><?= $money($totals['total']) ?></dd></div><div><dt>Quitado das parcelas</dt><dd><?= $money($totals['paid']) ?></dd></div><div><dt>Pendente de quitação</dt><dd><?= $money($totals['pending']) ?></dd></div></dl>
++<?php if (!$expenses): ?><p class="text-muted">Nenhuma despesa rateada neste mês.</p><?php else: ?><div class="finance-table-wrap" tabindex="0" role="region" aria-label="Despesas rateadas do mês"><table><thead><tr><th scope="col">Despesa / categoria</th><th scope="col">Data / vencimento</th><th scope="col">Total</th><th scope="col">Quitado</th><th scope="col">Pendente</th></tr></thead><tbody>
++<?php foreach ($expenses as $expense): ?><tr><td><?= $e($expense['title']) ?><br><small><?= $e($expense['category']) ?></small></td><td><?= $e($date($expense['expense_date'])) ?><br><small><?= $e($date($expense['due_date'])) ?></small></td><td><?= $money($expense['total']) ?></td><td><?= $money($expense['paid']) ?></td><td><?= $money($expense['pending']) ?></td></tr><?php endforeach; ?>
++</tbody></table></div><?php endif; ?></section>
++<section class="card finance-section"><h2>Rateio por morador</h2><p class="text-muted">Parcelas das despesas do mês, incluindo o histórico de moradores que saíram. Pagamentos aguardando confirmação ainda não são quitação.</p>
++<?php if (!$residents): ?><p>Nenhuma parcela encontrada neste mês.</p><?php else: ?><div class="finance-table-wrap" tabindex="0" role="region" aria-label="Rateio por morador"><table><thead><tr><th scope="col">Morador</th><th scope="col">Parte total</th><th scope="col">Quitado</th><th scope="col">Pendente</th></tr></thead><tbody><?php foreach ($residents as $resident): ?><tr><td><?= $e($resident['name']) ?></td><td><?= $money($resident['total']) ?></td><td><?= $money($resident['paid']) ?></td><td><?= $money($resident['pending']) ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?></section>
++<section class="card finance-section"><h2>Reserva no mês</h2><dl class="finance-statement"><div><dt>Saldo anterior ao mês</dt><dd><?= $money($cash['opening']) ?></dd></div><div><dt>Entradas</dt><dd><?= $money($cash['income']) ?></dd></div><div><dt>Saídas</dt><dd><?= $money($cash['expense']) ?></dd></div><div class="finance-total"><dt>Saldo ao fim do período</dt><dd><?= $money($cash['closing']) ?></dd></div></dl>
++<?php require __DIR__ . '/cash-table.php'; ?></section>
++<p class="text-muted finance-help">Relatório emitido em <?= date('d/m/Y H:i') ?> (horário de Brasília). Os gastos da reserva não compõem o total das despesas rateadas.</p>
++<?php require __DIR__ . '/end.php'; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/finance/start.php /mnt/data/integracao_rep/stage3/app/Views/finance/start.php
+--- /mnt/data/integracao_rep/stage2/app/Views/finance/start.php	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/finance/start.php	2026-11-15 01:34:39.717357054 +0000
+@@ -0,0 +1,21 @@
++<?php $financeStyles = true; require dirname(__DIR__) . '/partials/header.php'; ?>
++<a class="finance-skip" href="#finance-main">Pular para o conteúdo</a>
++<div class="app-layout">
++<?php require dirname(__DIR__) . '/partials/sidebar.php'; ?>
++<main id="finance-main" class="main-content finance" tabindex="-1">
++    <header class="page-header finance-heading">
++        <div>
++            <p class="eyebrow">Finanças da república</p>
++            <h1><?= $e($title) ?></h1>
++            <p class="text-muted"><?= $e($republic['name']) ?></p>
++        </div>
++        <form method="get" class="finance-filter">
++            <div class="form-group">
++                <label for="month">Mês de referência</label>
++                <input type="month" id="month" name="month" value="<?= $e($month) ?>" min="2000-01" max="2100-12" required>
++            </div>
++            <button class="button button-primary" type="submit">Aplicar</button>
++        </form>
++    </header>
++    <?php if ($notice): ?><div class="alert alert-success" role="status"><?= $e($notice) ?></div><?php endif; ?>
++    <?php if ($errors): ?><div class="alert alert-danger" role="alert"><strong>Confira o lançamento</strong><ul><?php foreach ($errors as $error): ?><li><?= $e($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/partials/header.php /mnt/data/integracao_rep/stage3/app/Views/partials/header.php
+--- /mnt/data/integracao_rep/stage2/app/Views/partials/header.php	2026-11-15 00:21:22.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/partials/header.php	2026-11-15 01:34:40.587521433 +0000
+@@ -11,5 +11,8 @@
+     <link rel="stylesheet" href="/assets/css/base.css">
+     <link rel="stylesheet" href="/assets/css/layout.css">
+     <link rel="stylesheet" href="/assets/css/components.css">
++    <?php if (!empty($financeStyles)): ?>
++    <link rel="stylesheet" href="/assets/css/finance.css">
++    <?php endif; ?>
+ </head>
+ <body>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/app/Views/partials/sidebar.php /mnt/data/integracao_rep/stage3/app/Views/partials/sidebar.php
+--- /mnt/data/integracao_rep/stage2/app/Views/partials/sidebar.php	2026-11-15 01:33:25.832980145 +0000
++++ /mnt/data/integracao_rep/stage3/app/Views/partials/sidebar.php	2026-11-15 01:34:40.587464536 +0000
+@@ -41,10 +41,14 @@
+             Despesas
+         </a>
+ 
+-        <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="#">
++        <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="/caixa">
+             Caixa
+         </a>
+ 
++        <a class="<?= $currentPage === 'reports' ? 'active' : '' ?>" href="/relatorios">
++            Relatórios
++        </a>
++
+         <a class="<?= $currentPage === 'members' ? 'active' : '' ?>" href="/republica/moradores">
+             Moradores
+         </a>
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/config/database.example.php /mnt/data/integracao_rep/stage3/config/database.example.php
+--- /mnt/data/integracao_rep/stage2/config/database.example.php	2026-11-11 16:13:50.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/config/database.example.php	2026-11-15 01:34:40.587603195 +0000
+@@ -3,7 +3,7 @@
+ return [
+     'host' => '127.0.0.1',
+     'port' => '3306',
+-    'dbname' => 'republicaixa',
++    'dbname' => getenv('REPUBLICAIXA_DB') ?: 'republicaixa',
+     'username' => 'root',
+     'password' => '',
+     'charset' => 'utf8mb4',
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/docs/modulo3/ALTERACOES-MODULO-3.json /mnt/data/integracao_rep/stage3/docs/modulo3/ALTERACOES-MODULO-3.json
+--- /mnt/data/integracao_rep/stage2/docs/modulo3/ALTERACOES-MODULO-3.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/docs/modulo3/ALTERACOES-MODULO-3.json	2026-11-15 01:34:39.725083414 +0000
+@@ -0,0 +1,192 @@
++{
++  "base": "RepubliCAIXA_FINAL.zip recebido do grupo",
++  "data": "2026-11-14",
++  "escopo": "Módulo 3 - Rodrigo; exclui configuração local, dados privados e histórico Git",
++  "alteracoes": [
++    {
++      "arquivo": ".gitignore",
++      "estado": "modificado",
++      "sha256": "41F10F8393BD5FD054FDFC4C80C15F755856FB3AE0CF81A91F8CAF29E917566F"
++    },
++    {
++      "arquivo": "README.md",
++      "estado": "modificado",
++      "sha256": "01B1749F800A91030CE477C76C791128856ED5A3FD29DCDD0DB4E671EB2CB082"
++    },
++    {
++      "arquivo": "app/Controllers/FinanceController.php",
++      "estado": "adicionado",
++      "sha256": "ADCA9DC2DB58F5B897EFCEA735B3718805728ED9509074D4CED5CA18D56BE500"
++    },
++    {
++      "arquivo": "app/Services/FinanceInput.php",
++      "estado": "adicionado",
++      "sha256": "5139502975D8B9EF2BF14A33C3D3911DE5C574D086770138C3AE77003E2FD30B"
++    },
++    {
++      "arquivo": "app/Services/FinanceService.php",
++      "estado": "adicionado",
++      "sha256": "C39CB045784112B370C89F6F7E356A9C9EF9B13BFB7CEBA568551C3DB7207041"
++    },
++    {
++      "arquivo": "app/Views/finance/cash-table.php",
++      "estado": "adicionado",
++      "sha256": "12BE7B120B42111200DDF3740BA65F510062DCAD326D81D93D205CEB9FA1532B"
++    },
++    {
++      "arquivo": "app/Views/finance/cash.php",
++      "estado": "adicionado",
++      "sha256": "645C47BC71B02738B42D01411FB86FB0026B602497717DA256144882E7E4EDB1"
++    },
++    {
++      "arquivo": "app/Views/finance/dashboard.php",
++      "estado": "adicionado",
++      "sha256": "15D8E135ADAC8409E9241241C39A7AD31FEAEB70E34A962A8C383B83B7AC7682"
++    },
++    {
++      "arquivo": "app/Views/finance/end.php",
++      "estado": "adicionado",
++      "sha256": "D5B2B01A253CAA9165673278182CEDF6A463BD5873CEA7BA7779C0C6026EAF11"
++    },
++    {
++      "arquivo": "app/Views/finance/error.php",
++      "estado": "adicionado",
++      "sha256": "8724DB5E8E91812CEBCC480EF5E197E54621E897D7F8E6A853762F2A623A0CC1"
++    },
++    {
++      "arquivo": "app/Views/finance/reports.php",
++      "estado": "adicionado",
++      "sha256": "534218E5DAFD177E59E6DCFAD07039A1DE01BD932A3137865932EF445F09F904"
++    },
++    {
++      "arquivo": "app/Views/finance/start.php",
++      "estado": "adicionado",
++      "sha256": "F56FF688FFB442996B9C769600B208555B73C869E5A90BB54ED1A769B21E6B71"
++    },
++    {
++      "arquivo": "app/Views/partials/header.php",
++      "estado": "modificado",
++      "sha256": "B665EAE839F3C2C519C1EA11C8C1F6EB15FA0F4C419A292F8C77E1FDBB58391D"
++    },
++    {
++      "arquivo": "app/Views/partials/sidebar.php",
++      "estado": "modificado",
++      "sha256": "FBF0618C353366042551FAA87DF87764C25B86FBADE99189B41B51A281E8F444"
++    },
++    {
++      "arquivo": "config/database.example.php",
++      "estado": "modificado",
++      "sha256": "FDB2E4C94A8EA1FBE51556E729D01EC9E0F545ACBFFE759D9C944227B6CF956F"
++    },
++    {
++      "arquivo": "docs/MODULO-3.md",
++      "estado": "adicionado",
++      "sha256": "F89C4EB2394518D831256D39CD099C4FCB3FE4B2C70F5C9DACCB039621CE7622"
++    },
++    {
++      "arquivo": "docs/evidencias/caixa-desktop.png",
++      "estado": "adicionado",
++      "sha256": "CEAD37CA7FDF680F9683C87AB07C79FC0A5BB83CBF51F086C7C97BFAC653E890"
++    },
++    {
++      "arquivo": "docs/evidencias/caixa-mobile.png",
++      "estado": "adicionado",
++      "sha256": "612E99FE7BC38A07D3BCD820B0C1773AABEFA08037CB00C89E30F4E1B820ACB6"
++    },
++    {
++      "arquivo": "docs/evidencias/dashboard-desktop.png",
++      "estado": "adicionado",
++      "sha256": "EFF8724EFAB6566BE84D4C4595497C00689BBB716FBF9BB3016A040464777EEE"
++    },
++    {
++      "arquivo": "docs/evidencias/dashboard-mobile.png",
++      "estado": "adicionado",
++      "sha256": "4B0BB5941A4A58DB1F14968EBC7584AFA5F7701EECE648668531115B79F16940"
++    },
++    {
++      "arquivo": "docs/evidencias/relatorios-desktop.png",
++      "estado": "adicionado",
++      "sha256": "4FDD6EBC680EDDBF6D1633C8579C1B9A3D8B3860AD0987EA54A3A868BD373451"
++    },
++    {
++      "arquivo": "docs/evidencias/relatorios-impressao.png",
++      "estado": "adicionado",
++      "sha256": "4C4E20E5A1A60C5DB54BBE977AB9F0078BB9ACD5F21E8958723D31FF5FE9531E"
++    },
++    {
++      "arquivo": "docs/evidencias/relatorios-mobile.png",
++      "estado": "adicionado",
++      "sha256": "E7087C92696C67CA6EEB0700EE6F2499E99C50DC27844671768AB82E188A3D14"
++    },
++    {
++      "arquivo": "docs/evidencias/testes.txt",
++      "estado": "adicionado",
++      "sha256": "023C67DF717CC075738E1F32549CE3BA17A55B576AF63B487D90C945C450C4E3"
++    },
++    {
++      "arquivo": "docs/evidencias/ui-result.json",
++      "estado": "adicionado",
++      "sha256": "B2629A68C4A8EDB597ED7EE3E6D1DF6A66836B4997CAAB0F073D7B22DA21F24A"
++    },
++    {
++      "arquivo": "public/index.php",
++      "estado": "modificado",
++      "sha256": "A344F05186169263F502FE3A558DC03EE19DC31239FB8ACA770D09C186CD7C09"
++    },
++    {
++      "arquivo": "public/assets/css/finance.css",
++      "estado": "adicionado",
++      "sha256": "A81CB85886DD2F287CF6C0B78604BBFDF09B989417B9B96E364E587A06431424"
++    },
++    {
++      "arquivo": "public/assets/js/finance.js",
++      "estado": "adicionado",
++      "sha256": "688C72380E108E88918E920CA95622424E2A0D5A4237A71A9F4B7E79AD3E7352"
++    },
++    {
++      "arquivo": "routes/web.php",
++      "estado": "modificado",
++      "sha256": "931DE97BAE419BBB64328AD8D30DFE7BE0A0E09BCA7DB85E9BC0AA31CCA3A354"
++    },
++    {
++      "arquivo": "storage/payment-proofs/.gitkeep",
++      "estado": "adicionado",
++      "sha256": "01BA4719C80B6FE911B091A7C05124B64EEECE964E09C058EF8F9805DACA546B"
++    },
++    {
++      "arquivo": "tests/bootstrap.php",
++      "estado": "adicionado",
++      "sha256": "A39AE9CE0A6E2BDAB8579583976CB413742551158F4F7AC9F6A9EC184E99B7C8"
++    },
++    {
++      "arquivo": "tests/concurrency.php",
++      "estado": "adicionado",
++      "sha256": "D1CC8797A2612FB42DBDFB58ABFCC86DDCBFF6493C74A1E4EA8DACDD2DD6D3D2"
++    },
++    {
++      "arquivo": "tests/finance.php",
++      "estado": "adicionado",
++      "sha256": "2513382E8B1B6D19AC730E977E5D4E3412CCA5528697885D7B4456176672FF3D"
++    },
++    {
++      "arquivo": "tests/http.php",
++      "estado": "adicionado",
++      "sha256": "38E3490C0E45D6501A6D70F2AA22C0B56500EB4A337958E89D20E1C3433F95B0"
++    },
++    {
++      "arquivo": "tests/run.ps1",
++      "estado": "adicionado",
++      "sha256": "64CF629625D8F4948B273B366F8092BB406E7A381453DDBE5E714C241D46B6FC"
++    },
++    {
++      "arquivo": "tests/setup.php",
++      "estado": "adicionado",
++      "sha256": "E594E929EA3A733FC77D3694B9D8FF5737A32773827572076FA20B7E801027AD"
++    },
++    {
++      "arquivo": "tests/verify-config.php",
++      "estado": "adicionado",
++      "sha256": "66A1C71DAB97F37BF7D63CF2C2FAD7F96F49BE036797316BC76EC95021E36F1B"
++    }
++  ]
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/docs/modulo3/MODULO-3.md /mnt/data/integracao_rep/stage3/docs/modulo3/MODULO-3.md
+--- /mnt/data/integracao_rep/stage2/docs/modulo3/MODULO-3.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/docs/modulo3/MODULO-3.md	2026-11-15 01:34:39.723644958 +0000
+@@ -0,0 +1,89 @@
++# Caixa, Dashboard e Relatórios — módulo de Rodrigo
++
++Implementação local de 14/11/2026, a partir do ZIP `RepubliCAIXA_FINAL.zip` fornecido pelo grupo. O código dos módulos de autenticação e despesas pertence à base recebida. O ZIP e o SQL originais não foram modificados.
++
++## Regra definida com Rodrigo
++
++O Caixa representa um **fundo de reserva separado** das despesas rateadas. Contribuições recebidas são entradas; gastos efetivamente realizados com a reserva são saídas. Confirmar o pagamento de uma parcela reduz a pendência do morador e não aumenta a reserva.
++
++Exemplo: três contribuições de R$ 50 geram R$ 150 de reserva. Um conserto de R$ 90 deixa R$ 60. Esse conserto não deve virar uma nova cobrança aos moradores. Nesta versão, essa distinção depende do registro correto pelo administrador; o sistema não identifica automaticamente se dois lançamentos em módulos diferentes representam o mesmo gasto real.
++
++Administradores registram movimentos; moradores ativos consultam. A república é obtida da sessão e da associação ativa no banco, usando a primeira república ativa por ID, como no módulo de despesas. A aplicação ainda não oferece seleção entre várias repúblicas.
++
++Não há edição nem exclusão de movimentos na interface. Correções são movimentos compensatórios, com referência ao número original e motivo na descrição. Não é um sistema contábil nem uma conciliação automática com banco ou Pix. O usuário registra os recebimentos e pagamentos realizados.
++
++## Telas e funcionamento
++
++| Tela | Rota | Conteúdo |
++|---|---|---|
++| 4 — Dashboard | `/` | Saldo atual da reserva; despesas do mês; pendências de todos os meses; reserva do mês; categorias; evolução de seis meses; cinco pendências por vencimento |
++| 8 — Caixa | `/caixa` | Entradas e saídas; formulário para administrador; extrato com autor, data, descrição e saldo após cada movimento |
++| 10 — Relatórios | `/relatorios` | Despesas e parcelas do mês; rateio por morador; extrato e saldos da reserva; impressão e CSV |
++
++O mês das despesas é determinado por `expenses.expense_date`, não pela data em que o registro foi criado. A situação de quitação é atual: consultar novembro inclui pagamentos dessas parcelas confirmados em dezembro. Portanto, o relatório de parcelas não é uma fotografia histórica da inadimplência ao fechamento do mês. O extrato da reserva usa a data efetiva de cada movimento e calcula o saldo anterior e o final do período. O saldo atual inclui todos os movimentos, independentemente do mês filtrado.
++
++Pagamentos pendentes ou rejeitados não contam como quitação. Para compatibilidade com os dados recebidos, uma parcela marcada `paid` continua considerada quitada mesmo quando o histórico de pagamentos não possui o valor completo. A mesma regra já é usada pelo módulo dos colegas.
++
++## Caminho da tela até o banco
++
++1. O navegador solicita a rota; `public/index.php` inicia a sessão e consulta `routes/web.php`.
++2. `FinanceController` verifica o login, resolve a república, valida campos e prepara a tela ou o CSV.
++3. `FinanceService` consulta MariaDB/MySQL via PDO e executa as regras de movimentação.
++4. `app/Views/finance/` produz HTML com os dados escapados. CSS e JavaScript próprios ficam em `public/assets/`.
++
++É uma aplicação PHP organizada em controlador, serviço e visualização, com páginas renderizadas no servidor. Preserva a arquitetura existente do grupo. Não introduz framework, API externa ou dependência de gráficos; os gráficos usam HTML/CSS com os mesmos valores disponíveis em texto. Não há alteração estrutural nas tabelas, e `database/schema.sql` continua sendo a referência do grupo.
++
++O dinheiro é calculado em centavos inteiros no PHP e armazenado como DECIMAL no banco. Os pagamentos são agregados por parcela antes de juntar às despesas, evitando multiplicar valores quando uma parcela possui vários pagamentos.
++
++## Controles e tratamento de erros
++
++- PDO com consultas preparadas: valores não são concatenados ao SQL. Identificadores de república e autor vêm do contexto autorizado no servidor.
++- `htmlspecialchars` nas saídas HTML, inclusive quando o formulário reaparece com erro. Texto perigoso é exibido como texto.
++- Token CSRF ligado à sessão nas gravações do Caixa. Um segundo token de envio impede repetir o mesmo formulário depois de uma gravação bem-sucedida.
++- Conta, vínculo e república devem estar ativos. A permissão de administrador é revalidada dentro da transação de gravação.
++- Valores positivos com até duas casas decimais; descrição de 3 a 255 caracteres; datas reais entre 2000 e o dia atual. Mês de filtro entre 2000 e 2100.
++- Transação de banco, bloqueio da república com `FOR UPDATE` e validação do histórico impedem saldo negativo, inclusive em lançamentos retroativos e simultâneos.
++- Falhas de validação: HTTP 422 e mensagem legível; falta de permissão/CSRF: 403; formulário repetido: 409; sessão ausente: redirecionamento para login.
++- Falha inesperada: mensagem genérica e HTTP 500; detalhes apenas no log do servidor. Não mostrar erros PHP em produção.
++- CSV neutraliza textos que poderiam ser interpretados como fórmulas e aplica a mesma autorização da tela.
++
++Esses controles foram implementados e testados no módulo 3. Isso não constitui uma auditoria completa da autenticação, dos uploads ou de todos os módulos dos colegas.
++
++## Evidências e testes
++
++Ambiente: PHP 8.2.12 e MariaDB 10.4.32 locais. Dados sintéticos em banco isolado com prefixo `republicaixa_finance_test_`. Cada execução cria um banco novo; não limpa ou sobrescreve um banco existente. Não executar os testes apontando para dados de produção.
++
++No Windows, configure `config/database.php` seguindo o exemplo (incluindo a variável `REPUBLICAIXA_DB`), tenha MySQL/MariaDB iniciado e execute na raiz:
++
++```powershell
++powershell -ExecutionPolicy Bypass -File tests/run.ps1
++```
++
++| Verificação | Evidência |
++|---|---|
++| 34 verificações de precisão, validação, saldos, rateio, isolamento, rollback e estados de pagamento | `tests/finance.php` |
++| Duas saídas simultâneas de R$ 75 sobre saldo de R$ 100: uma aceita, uma recusada, saldo R$ 25 | `tests/concurrency.php` |
++| 37 verificações HTTP de login, permissões, CSRF, repetição de formulário, SQL injection, XSS, CSV e integração real com pagamento de parcela | `tests/http.php` |
++| Telas em 1360 × 900 e 390 × 844, sem transbordamento lateral da página; menu móvel e campos identificados | `docs/evidencias/ui-result.json` e capturas PNG |
++
++Os testes de SQL injection enviam um texto semelhante a uma instrução SQL no campo descrição e verificam que foi armazenado como dado, mantendo a tabela intacta. Os de XSS usam uma tag com manipulador de evento e verificam seu escape no extrato e no formulário com erro. São testes direcionados, não uma garantia de ausência de qualquer vulnerabilidade.
++
++O teste de integração confirma uma parcela pelo endpoint existente dos colegas, verifica a atualização do relatório e confirma que a reserva permanece igual. Os dados desse teste não aparecem no banco de demonstração.
++
++## Integração com o trabalho do grupo
++
++Novos arquivos principais: `FinanceController.php`, `FinanceService.php`, `FinanceInput.php`, `app/Views/finance/`, `finance.css`, `finance.js`, `tests/` e este guia.
++
++Arquivos compartilhados alterados: `routes/web.php` (rotas financeiras e dashboard), `sidebar.php` (links de Caixa e Relatórios), `header.php` (CSS apenas nas telas financeiras), `public/index.php` (fuso de São Paulo), `config/database.example.php` (nome do banco configurável por ambiente), `.gitignore` (dados locais e comprovantes privados). A antiga `home.php` permanece na base, mas a rota `/` agora usa `FinanceController` e `finance/dashboard.php`.
++
++Ao integrar em uma versão mais recente do projeto, comparar esses arquivos compartilhados em vez de sobrescrevê-los inteiros. O código recebido já continha alterações não commitadas dos colegas; um `git diff` contra o commit antigo mistura essas alterações com o módulo 3. O arquivo `docs/ALTERACOES-MODULO-3.json` identifica as diferenças em relação ao ZIP recebido.
++
++Não enviar `config/database.php`, `.local/`, o banco local nem comprovantes privados ao repositório. O esquema do banco não mudou. Nenhum commit, push ou publicação foi feito por esta implementação.
++
++Pontos ainda pertencentes à integração do grupo: telas de Moradores e Perfil continuam com links provisórios na base recebida; cadastro/seleção de república precisa estar integrado pelo responsável; revisar os dados de exemplo com datas irreais; revisar a exposição de `public/test-db.php` antes de publicar; definir hospedagem PHP/MySQL, HTTPS e configuração segura de sessões. Não foram implementados como parte do módulo 3.
++
++Limitações desta versão: extratos e relatórios mensais são carregados integralmente; volumes grandes pedirão paginação/consultas agregadas adicionais. Não há pagamento bancário real, integração Pix, conciliação automática, comprovante específico de reserva, exportação PDF pelo servidor ou seleção de múltiplas repúblicas. O botão de PDF usa a impressão do navegador.
++
++## Uso de IA e autoria
++
++Rodrigo escolheu, em discussão com ChatGPT/Codex, o modelo de reserva separada. ChatGPT/Codex auxiliou na análise da base recebida, implementação do módulo 3, testes automatizados e documentação. O código e os dados anteriores foram fornecidos pelo grupo e preservados como base; não devem ser atribuídos ao módulo 3. Esta declaração é um registro para compor a seção de uso de IA do relatório do grupo. Rodrigo e colegas ainda precisam revisar, compreender e validar o resultado para a entrega e a defesa.
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/caixa-desktop.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/caixa-desktop.png differ
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/caixa-mobile.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/caixa-mobile.png differ
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/dashboard-desktop.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/dashboard-desktop.png differ
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/dashboard-mobile.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/dashboard-mobile.png differ
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/relatorios-desktop.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/relatorios-desktop.png differ
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/relatorios-impressao.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/relatorios-impressao.png differ
+Binary files /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/relatorios-mobile.png and /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/relatorios-mobile.png differ
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/testes.txt /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/testes.txt
+--- /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/testes.txt	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/testes.txt	2026-11-15 01:34:39.730158621 +0000
+@@ -0,0 +1,76 @@
++Banco de testes criado: republicaixa_finance_test_20261114162223_5faa
++OK Precisão de centavos
++OK Formatação monetária
++OK Mês inválido rejeitado
++OK Mês inválido rejeitado
++OK Mês inválido rejeitado
++OK Mês inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Lançamento inválido rejeitado
++OK Fórmula CSV neutralizada
++OK Perfis obtidos do banco
++OK Conta sem república
++OK Saldo anterior, entradas, saídas e fechamento
++OK JOIN de pagamentos não duplica despesas
++OK Somente confirmado e legado quitado contam como pago
++OK Pendência do mês
++OK Pendência global inclui outros meses
++OK Rateio por morador concilia com despesas
++OK Consultas isolam repúblicas
++OK Morador não movimenta caixa
++OK Administrador externo não movimenta caixa
++OK Saída acima do saldo rejeitada
++OK Saída retroativa que cria saldo negativo rejeitada
++OK Falhas fazem rollback sem alterar saldo
++OK Confirmação de parcela não altera reserva
++OK Confirmação atualiza indicador de quitação
++OK Usuário desativado perde acesso
++34 verificações aprovadas.
++OK Duas saídas simultâneas: uma aceita, outra rejeitada; saldo final R$ 25,00.
++OK Rota protegida: /
++OK Rota protegida: /caixa
++OK Rota protegida: /relatorios
++OK Rota protegida: /relatorios/exportar?tipo=caixa&month=2026-11
++OK Login admin
++OK Dashboard integra despesas e reserva
++OK Dashboard não expõe outra república
++OK Filtro inválido retorna erro tratado
++OK Campo em formato de array tratado
++OK Caixa disponível
++OK CSRF inválido rejeitado
++OK Saldo insuficiente tratado na tela
++OK Entrada confirmada redireciona
++OK Reenvio do formulário não duplica lançamento
++OK Caixa disponível
++OK Texto com HTML pode ser armazenado como dado
++OK XSS armazenado escapado na exibição
++OK Caixa disponível
++OK XSS refletido escapado em erro de formulário
++OK Caixa disponível
++OK Texto de injeção SQL registrado como dado
++OK Tabela e registros preservados após entrada SQL
++OK Caixa disponível
++OK Descrição de teste de CSV registrada
++OK Exportação CSV neutraliza fórmula e isola república
++OK Exportação de despesas correta
++OK Login member
++OK Morador consulta sem formulário de lançamento
++OK Morador não consegue gravar por requisição direta
++OK Login outsider
++OK Parâmetro forjado não muda a república autorizada
++OK Login none
++OK Conta sem vínculo tem resposta clara
++OK Tela de despesas do colega preservada
++OK Confirmação real de parcela funciona
++OK Pagamento real de despesa não altera reserva
++OK Relatório reflete pagamento confirmado
++37 verificações HTTP aprovadas.
++Concluído: 34 verificações de cálculo/serviço, 1 cenário concorrente e 37 verificações HTTP.
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/ui-result.json /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/ui-result.json
+--- /mnt/data/integracao_rep/stage2/docs/modulo3/evidencias/ui-result.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/docs/modulo3/evidencias/ui-result.json	2026-11-15 01:34:39.730185706 +0000
+@@ -0,0 +1,47 @@
++{
++  "checks": [
++    {
++      "screen": "dashboard",
++      "desktop": {
++        "width": 1360,
++        "scroll": 1360,
++        "h1": "Dashboard",
++        "unlabelled": 0
++      },
++      "mobile": {
++        "width": 390,
++        "scroll": 390
++      },
++      "menu": "OK"
++    },
++    {
++      "screen": "caixa",
++      "desktop": {
++        "width": 1360,
++        "scroll": 1360,
++        "h1": "Caixa da reserva",
++        "unlabelled": 0
++      },
++      "mobile": {
++        "width": 390,
++        "scroll": 390
++      },
++      "menu": "OK"
++    },
++    {
++      "screen": "relatorios",
++      "desktop": {
++        "width": 1360,
++        "scroll": 1360,
++        "h1": "Relatórios",
++        "unlabelled": 0
++      },
++      "mobile": {
++        "width": 390,
++        "scroll": 390
++      },
++      "menu": "OK"
++    }
++  ],
++  "jsErrors": []
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/public/assets/css/finance.css /mnt/data/integracao_rep/stage3/public/assets/css/finance.css
+--- /mnt/data/integracao_rep/stage2/public/assets/css/finance.css	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/public/assets/css/finance.css	2026-11-15 01:34:39.718838741 +0000
+@@ -0,0 +1,58 @@
++.finance { min-width: 0; }
++.finance-heading { display: flex; justify-content: space-between; align-items: start; gap: 24px; flex-wrap: wrap; }
++.finance-filter, .finance-actions { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; }
++.finance-filter .form-group { max-width: 240px; }
++.finance-cards { margin-bottom: 24px; }
++.finance-cards .card-label { font-weight: 600; font-size: .95rem; }
++.finance-cards .card-value { overflow-wrap: anywhere; }
++.finance-cards p { margin: 12px 0; font-size: .9rem; }
++.finance-note { border-left: 4px solid #0f766e; background: #eaf5f3; padding: 16px; border-radius: 4px; line-height: 1.6; }
++.finance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
++.finance-section { margin-top: 24px; }
++.finance h2 { font-size: 1.25rem; }
++.finance-statement { margin: 0 0 16px; }
++.finance-statement div { display: flex; justify-content: space-between; gap: 24px; padding: 12px 0; border-bottom: 1px solid var(--color-border); }
++.finance-statement dd { margin: 0; font-weight: 600; white-space: nowrap; }
++.finance-total { font-weight: 700; }
++.finance-income { color: #11613c; }
++.finance-expense { color: #b91c1c; }
++.finance-warning { color: #92400e; }
++.finance-link { color: #0b655e; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
++.finance-bars { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
++.finance-bars li > div:first-child { display: flex; justify-content: space-between; gap: 12px; font-size: .9rem; }
++.finance-bars strong { white-space: nowrap; }
++.finance-track { background: #e8eef2; border-radius: 6px; overflow: hidden; height: 10px; margin-top: 6px; }
++.finance-track span { display: block; height: 100%; background: #0f766e; border-radius: inherit; }
++.finance-history { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
++.finance-table-wrap { overflow-x: auto; margin: 16px 0; }
++.finance table { width: 100%; border-collapse: collapse; text-align: left; font-size: .93rem; }
++.finance th { color: #475569; background: #f8fafc; }
++.finance th, .finance td { padding: 14px 12px; border-bottom: 1px solid var(--color-border); vertical-align: top; }
++.finance td { overflow-wrap: anywhere; min-width: 100px; }
++.finance th { white-space: nowrap; }
++.finance-badge { display: inline-block; border: 1px solid #fecaca; background: #fff1f2; color: #991b1b; padding: 3px 7px; border-radius: 6px; font-size: .75rem; margin-top: 4px; }
++.finance-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
++.finance-wide { grid-column: 1 / -1; }
++.finance-help { margin-top: 20px; font-size: .9rem; line-height: 1.5; }
++.finance small { color: #475569; line-height: 1.5; }
++.finance-skip { position: absolute; top: -100px; left: 16px; padding: 12px; background: white; z-index: 200; color: #0b655e; }
++.finance-skip:focus { top: 8px; }
++.finance :focus-visible, .finance-skip:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }
++.finance-sr { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
++@media (max-width: 1050px) { .finance-grid { grid-template-columns: 1fr; } .finance.card-grid, .finance .card-grid { grid-template-columns: 1fr; } }
++@media (max-width: 600px) { .finance-form, .finance-history { grid-template-columns: 1fr; } .finance .card { padding: 18px; } .finance-statement div { flex-wrap: wrap; gap: 8px; } .finance-filter { width: 100%; } .finance-actions { align-items: start; flex-direction: column; } }
++@media print {
++    .sidebar, .finance-filter, .finance-actions, .finance-skip, .finance form { display: none !important; }
++    .app-layout { display: block; }
++    .main-content { max-width: none; padding: 0; }
++    .finance .card { box-shadow: none; border: 0; padding: 0; }
++    .finance-note { background: white; border-left: 0; padding: 0; }
++    .finance-table-wrap { overflow: visible; }
++    .finance table { font-size: 9pt; }
++    .finance th, .finance td { min-width: 0; white-space: normal; padding: 7px 5px; }
++    .finance tr { break-inside: avoid; }
++    .finance h2 { break-after: avoid; }
++    .finance thead { display: table-header-group; }
++    .finance-section { margin-top: 20px; }
++    @page { size: A4 landscape; margin: 15mm; }
++}
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/public/assets/js/finance.js /mnt/data/integracao_rep/stage3/public/assets/js/finance.js
+--- /mnt/data/integracao_rep/stage2/public/assets/js/finance.js	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/public/assets/js/finance.js	2026-11-15 01:34:39.720470345 +0000
+@@ -0,0 +1 @@
++document.getElementById('finance-print')?.addEventListener('click', () => window.print());
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/public/index.php /mnt/data/integracao_rep/stage3/public/index.php
+--- /mnt/data/integracao_rep/stage2/public/index.php	2026-11-15 00:21:22.000000000 +0000
++++ /mnt/data/integracao_rep/stage3/public/index.php	2026-11-15 01:34:40.587565103 +0000
+@@ -2,6 +2,8 @@
+ 
+ declare(strict_types=1);
+ 
++date_default_timezone_set('America/Sao_Paulo');
++
+ spl_autoload_register(function (string $class): void {
+     $prefix = 'App\\';
+     $baseDir = dirname(__DIR__) . '/app/';
+diff -ruN '--exclude=.git' /mnt/data/integracao_rep/stage2/routes/web.php /mnt/data/integracao_rep/stage3/routes/web.php
+--- /mnt/data/integracao_rep/stage2/routes/web.php	2026-11-15 01:33:25.832828584 +0000
++++ /mnt/data/integracao_rep/stage3/routes/web.php	2026-11-15 01:34:40.587278164 +0000
+@@ -6,9 +6,11 @@
+ use App\Controllers\ExpenseDetailsController;
+ use App\Controllers\ExpenseEditController;
+ use App\Controllers\ExpensePaymentController;
++use App\Controllers\FinanceController;
+ use App\Controllers\MemberController;
+ use App\Controllers\ProfileController;
+ use App\Controllers\RepublicController;
++use App\Middleware\AuthMiddleware;
+ 
+ return [
+ 
+@@ -18,8 +20,28 @@
+     },
+ 
+     'GET /dashboard' => function (): void {
+-        (new DashboardController())
+-            ->index();
++        AuthMiddleware::requireLogin();
++        (new FinanceController())->handle('dashboard');
++    },
++
++    'GET /caixa' => function (): void {
++        AuthMiddleware::requireLogin();
++        (new FinanceController())->handle('cash');
++    },
++
++    'POST /caixa' => function (): void {
++        AuthMiddleware::requireLogin();
++        (new FinanceController())->handle('store');
++    },
++
++    'GET /relatorios' => function (): void {
++        AuthMiddleware::requireLogin();
++        (new FinanceController())->handle('reports');
++    },
++
++    'GET /relatorios/exportar' => function (): void {
++        AuthMiddleware::requireLogin();
++        (new FinanceController())->handle('export');
+     },
+ 
+     'GET /despesas' => function (): void {
