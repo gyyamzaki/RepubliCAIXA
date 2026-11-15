@@ -37,12 +37,16 @@ $logoutCsrfToken = Csrf::token();
             Dashboard
         </a>
 
-        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="#">
+        <a class="<?= $currentPage === 'expenses' ? 'active' : '' ?>" href="/despesas">
             Despesas
         </a>
 
-        <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="#">
+        <a class="<?= $currentPage === 'cash' ? 'active' : '' ?>" href="/caixa">
             Caixa
+        </a>
+
+        <a class="<?= $currentPage === 'reports' ? 'active' : '' ?>" href="/relatorios">
+            Relatórios
         </a>
 
         <a class="<?= $currentPage === 'members' ? 'active' : '' ?>" href="/republica/moradores">

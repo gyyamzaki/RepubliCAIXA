@@ -13,3 +13,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Comprovantes de pagamento (arquivos gerados em execução)
+/storage/payment-proofs/*
+!/storage/payment-proofs/.gitkeep
+/.local/

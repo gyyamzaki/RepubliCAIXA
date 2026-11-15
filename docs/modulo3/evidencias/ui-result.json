@@ -1,0 +1,47 @@
+{
+  "checks": [
+    {
+      "screen": "dashboard",
+      "desktop": {
+        "width": 1360,
+        "scroll": 1360,
+        "h1": "Dashboard",
+        "unlabelled": 0
+      },
+      "mobile": {
+        "width": 390,
+        "scroll": 390
+      },
+      "menu": "OK"
+    },
+    {
+      "screen": "caixa",
+      "desktop": {
+        "width": 1360,
+        "scroll": 1360,
+        "h1": "Caixa da reserva",
+        "unlabelled": 0
+      },
+      "mobile": {
+        "width": 390,
+        "scroll": 390
+      },
+      "menu": "OK"
+    },
+    {
+      "screen": "relatorios",
+      "desktop": {
+        "width": 1360,
+        "scroll": 1360,
+        "h1": "Relatórios",
+        "unlabelled": 0
+      },
+      "mobile": {
+        "width": 390,
+        "scroll": 390
+      },
+      "menu": "OK"
+    }
+  ],
+  "jsErrors": []
+}

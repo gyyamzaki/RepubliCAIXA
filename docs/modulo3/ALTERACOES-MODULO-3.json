@@ -1,0 +1,192 @@
+{
+  "base": "RepubliCAIXA_FINAL.zip recebido do grupo",
+  "data": "2026-11-14",
+  "escopo": "Módulo 3 - Rodrigo; exclui configuração local, dados privados e histórico Git",
+  "alteracoes": [
+    {
+      "arquivo": ".gitignore",
+      "estado": "modificado",
+      "sha256": "41F10F8393BD5FD054FDFC4C80C15F755856FB3AE0CF81A91F8CAF29E917566F"
+    },
+    {
+      "arquivo": "README.md",
+      "estado": "modificado",
+      "sha256": "01B1749F800A91030CE477C76C791128856ED5A3FD29DCDD0DB4E671EB2CB082"
+    },
+    {
+      "arquivo": "app/Controllers/FinanceController.php",
+      "estado": "adicionado",
+      "sha256": "ADCA9DC2DB58F5B897EFCEA735B3718805728ED9509074D4CED5CA18D56BE500"
+    },
+    {
+      "arquivo": "app/Services/FinanceInput.php",
+      "estado": "adicionado",
+      "sha256": "5139502975D8B9EF2BF14A33C3D3911DE5C574D086770138C3AE77003E2FD30B"
+    },
+    {
+      "arquivo": "app/Services/FinanceService.php",
+      "estado": "adicionado",
+      "sha256": "C39CB045784112B370C89F6F7E356A9C9EF9B13BFB7CEBA568551C3DB7207041"
+    },
+    {
+      "arquivo": "app/Views/finance/cash-table.php",
+      "estado": "adicionado",
+      "sha256": "12BE7B120B42111200DDF3740BA65F510062DCAD326D81D93D205CEB9FA1532B"
+    },
+    {
+      "arquivo": "app/Views/finance/cash.php",
+      "estado": "adicionado",
+      "sha256": "645C47BC71B02738B42D01411FB86FB0026B602497717DA256144882E7E4EDB1"
+    },
+    {
+      "arquivo": "app/Views/finance/dashboard.php",
+      "estado": "adicionado",
+      "sha256": "15D8E135ADAC8409E9241241C39A7AD31FEAEB70E34A962A8C383B83B7AC7682"
+    },
+    {
+      "arquivo": "app/Views/finance/end.php",
+      "estado": "adicionado",
+      "sha256": "D5B2B01A253CAA9165673278182CEDF6A463BD5873CEA7BA7779C0C6026EAF11"
+    },
+    {
+      "arquivo": "app/Views/finance/error.php",
+      "estado": "adicionado",
+      "sha256": "8724DB5E8E91812CEBCC480EF5E197E54621E897D7F8E6A853762F2A623A0CC1"
+    },
+    {
+      "arquivo": "app/Views/finance/reports.php",
+      "estado": "adicionado",
+      "sha256": "534218E5DAFD177E59E6DCFAD07039A1DE01BD932A3137865932EF445F09F904"
+    },
+    {
+      "arquivo": "app/Views/finance/start.php",
+      "estado": "adicionado",
+      "sha256": "F56FF688FFB442996B9C769600B208555B73C869E5A90BB54ED1A769B21E6B71"
+    },
+    {
+      "arquivo": "app/Views/partials/header.php",
+      "estado": "modificado",
+      "sha256": "B665EAE839F3C2C519C1EA11C8C1F6EB15FA0F4C419A292F8C77E1FDBB58391D"
+    },
+    {
+      "arquivo": "app/Views/partials/sidebar.php",
+      "estado": "modificado",
+      "sha256": "FBF0618C353366042551FAA87DF87764C25B86FBADE99189B41B51A281E8F444"
+    },
+    {
+      "arquivo": "config/database.example.php",
+      "estado": "modificado",
+      "sha256": "FDB2E4C94A8EA1FBE51556E729D01EC9E0F545ACBFFE759D9C944227B6CF956F"
+    },
+    {
+      "arquivo": "docs/MODULO-3.md",
+      "estado": "adicionado",
+      "sha256": "F89C4EB2394518D831256D39CD099C4FCB3FE4B2C70F5C9DACCB039621CE7622"
+    },
+    {
+      "arquivo": "docs/evidencias/caixa-desktop.png",
+      "estado": "adicionado",
+      "sha256": "CEAD37CA7FDF680F9683C87AB07C79FC0A5BB83CBF51F086C7C97BFAC653E890"
+    },
+    {
+      "arquivo": "docs/evidencias/caixa-mobile.png",
+      "estado": "adicionado",
+      "sha256": "612E99FE7BC38A07D3BCD820B0C1773AABEFA08037CB00C89E30F4E1B820ACB6"
+    },
+    {
+      "arquivo": "docs/evidencias/dashboard-desktop.png",
+      "estado": "adicionado",
+      "sha256": "EFF8724EFAB6566BE84D4C4595497C00689BBB716FBF9BB3016A040464777EEE"
+    },
+    {
+      "arquivo": "docs/evidencias/dashboard-mobile.png",
+      "estado": "adicionado",
+      "sha256": "4B0BB5941A4A58DB1F14968EBC7584AFA5F7701EECE648668531115B79F16940"
+    },
+    {
+      "arquivo": "docs/evidencias/relatorios-desktop.png",
+      "estado": "adicionado",
+      "sha256": "4FDD6EBC680EDDBF6D1633C8579C1B9A3D8B3860AD0987EA54A3A868BD373451"
+    },
+    {
+      "arquivo": "docs/evidencias/relatorios-impressao.png",
+      "estado": "adicionado",
+      "sha256": "4C4E20E5A1A60C5DB54BBE977AB9F0078BB9ACD5F21E8958723D31FF5FE9531E"
+    },
+    {
+      "arquivo": "docs/evidencias/relatorios-mobile.png",
+      "estado": "adicionado",
+      "sha256": "E7087C92696C67CA6EEB0700EE6F2499E99C50DC27844671768AB82E188A3D14"
+    },
+    {
+      "arquivo": "docs/evidencias/testes.txt",
+      "estado": "adicionado",
+      "sha256": "023C67DF717CC075738E1F32549CE3BA17A55B576AF63B487D90C945C450C4E3"
+    },
+    {
+      "arquivo": "docs/evidencias/ui-result.json",
+      "estado": "adicionado",
+      "sha256": "B2629A68C4A8EDB597ED7EE3E6D1DF6A66836B4997CAAB0F073D7B22DA21F24A"
+    },
+    {
+      "arquivo": "public/index.php",
+      "estado": "modificado",
+      "sha256": "A344F05186169263F502FE3A558DC03EE19DC31239FB8ACA770D09C186CD7C09"
+    },
+    {
+      "arquivo": "public/assets/css/finance.css",
+      "estado": "adicionado",
+      "sha256": "A81CB85886DD2F287CF6C0B78604BBFDF09B989417B9B96E364E587A06431424"
+    },
+    {
+      "arquivo": "public/assets/js/finance.js",
+      "estado": "adicionado",
+      "sha256": "688C72380E108E88918E920CA95622424E2A0D5A4237A71A9F4B7E79AD3E7352"
+    },
+    {
+      "arquivo": "routes/web.php",
+      "estado": "modificado",
+      "sha256": "931DE97BAE419BBB64328AD8D30DFE7BE0A0E09BCA7DB85E9BC0AA31CCA3A354"
+    },
+    {
+      "arquivo": "storage/payment-proofs/.gitkeep",
+      "estado": "adicionado",
+      "sha256": "01BA4719C80B6FE911B091A7C05124B64EEECE964E09C058EF8F9805DACA546B"
+    },
+    {
+      "arquivo": "tests/bootstrap.php",
+      "estado": "adicionado",
+      "sha256": "A39AE9CE0A6E2BDAB8579583976CB413742551158F4F7AC9F6A9EC184E99B7C8"
+    },
+    {
+      "arquivo": "tests/concurrency.php",
+      "estado": "adicionado",
+      "sha256": "D1CC8797A2612FB42DBDFB58ABFCC86DDCBFF6493C74A1E4EA8DACDD2DD6D3D2"
+    },
+    {
+      "arquivo": "tests/finance.php",
+      "estado": "adicionado",
+      "sha256": "2513382E8B1B6D19AC730E977E5D4E3412CCA5528697885D7B4456176672FF3D"
+    },
+    {
+      "arquivo": "tests/http.php",
+      "estado": "adicionado",
+      "sha256": "38E3490C0E45D6501A6D70F2AA22C0B56500EB4A337958E89D20E1C3433F95B0"
+    },
+    {
+      "arquivo": "tests/run.ps1",
+      "estado": "adicionado",
+      "sha256": "64CF629625D8F4948B273B366F8092BB406E7A381453DDBE5E714C241D46B6FC"
+    },
+    {
+      "arquivo": "tests/setup.php",
+      "estado": "adicionado",
+      "sha256": "E594E929EA3A733FC77D3694B9D8FF5737A32773827572076FA20B7E801027AD"
+    },
+    {
+      "arquivo": "tests/verify-config.php",
+      "estado": "adicionado",
+      "sha256": "66A1C71DAB97F37BF7D63CF2C2FAD7F96F49BE036797316BC76EC95021E36F1B"
+    }
+  ]
+}
