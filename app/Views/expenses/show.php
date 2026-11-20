@@ -1,4 +1,3 @@
-
 <?php
 
 $pageTitle = 'Detalhes da despesa - RepubliCAIXA';
@@ -35,14 +34,14 @@ $tipos = [
     'custom' => 'Personalizado',
 ];
 
-// IDENTIFICAR O USUÁRIO LOGADO
+// IDENTIFICAR USUÁRIO LOGADO
 $usuario = \App\Core\Session::get('user');
 
 $usuarioId = is_array($usuario)
     ? (int) ($usuario['id'] ?? 0)
     : 0;
 
-// BUSCAR O PAPEL DO USUÁRIO NA REPÚBLICA
+// CONSULTAR PAPEL DO USUÁRIO NA REPÚBLICA
 $consultaMembro = \App\Core\Database::connection()->prepare(
     'SELECT id, role
      FROM republic_members
@@ -54,7 +53,7 @@ $consultaMembro = \App\Core\Database::connection()->prepare(
 
 $consultaMembro->execute([
     'republica' => (int) $despesa['republic_id'],
-    'usuario' => $usuarioId,
+    'usuario' => $usuarioId
 ]);
 
 $membroAtual = $consultaMembro->fetch(
@@ -62,10 +61,9 @@ $membroAtual = $consultaMembro->fetch(
 ) ?: [];
 
 $membroId = (int) ($membroAtual['id'] ?? 0);
-
 $ehAdmin = ($membroAtual['role'] ?? '') === 'admin';
 
-// TOKEN DE SEGURANÇA DOS FORMULÁRIOS
+// TOKEN CSRF
 $csrf = \App\Core\Session::get('csrf_despesas');
 
 if (!is_string($csrf) || $csrf === '') {
@@ -77,7 +75,7 @@ if (!is_string($csrf) || $csrf === '') {
     );
 }
 
-// VALORES REGISTRADOS OU AGUARDANDO CONFIRMAÇÃO
+// VALORES PENDENTES OU CONFIRMADOS
 $comprometidoPorParte = [];
 
 foreach ($pagamentos as $pagamento) {
@@ -197,6 +195,7 @@ require __DIR__ . '/../partials/header.php';
     .details-table td {
         padding: 12px 10px;
         border-bottom: 1px solid #e2e8f0;
+        vertical-align: middle;
     }
 
     .details-table th {
@@ -286,7 +285,22 @@ require __DIR__ . '/../partials/header.php';
     }
 
     .details-btn-small {
-        padding: 7px 12px;
+        padding: 8px 12px;
+    }
+
+    .details-btn-reject {
+        background: #b91c1c;
+    }
+
+    .details-btn-reject:hover {
+        background: #991b1b;
+    }
+
+    .details-admin-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
     }
 
     .details-pending {
@@ -346,14 +360,14 @@ require __DIR__ . '/../partials/header.php';
 
         </div>
 
-        <!-- MENSAGENS DE SUCESSO -->
+        <!-- MENSAGENS -->
         <?php if (
             ($_GET['pagamento'] ?? '') === 'registrado'
         ): ?>
 
             <div class="details-notice" role="status">
-                Pagamento registrado!
-                Ele aguarda a confirmação de um administrador.
+                Pagamento registrado com sucesso!
+                Aguarda confirmação do administrador.
             </div>
 
         <?php elseif (
@@ -361,8 +375,17 @@ require __DIR__ . '/../partials/header.php';
         ): ?>
 
             <div class="details-notice" role="status">
-                Pagamento confirmado!
+                Pagamento confirmado com sucesso!
                 Os totais foram atualizados.
+            </div>
+
+        <?php elseif (
+            ($_GET['pagamento'] ?? '') === 'rejeitado'
+        ): ?>
+
+            <div class="details-notice" role="status">
+                Pagamento rejeitado com sucesso!
+                O valor está disponível para um novo registro.
             </div>
 
         <?php endif; ?>
@@ -512,7 +535,7 @@ require __DIR__ . '/../partials/header.php';
 
         </section>
 
-        <!-- RATEIO ENTRE MORADORES -->
+        <!-- RATEIO -->
         <section class="card details-section">
 
             <h2>Quanto cada morador deve</h2>
@@ -594,13 +617,13 @@ require __DIR__ . '/../partials/header.php';
 
             <p class="details-note">
                 Informe quanto foi pago.
-                O comprovante em PDF, JPG ou PNG é opcional
-                (até 5 MB).
+                O comprovante é opcional e pode ser
+                PDF, JPG ou PNG, de até 5 MB.
             </p>
 
             <p class="details-note">
-                O valor só aparecerá em "Total pago"
-                após a confirmação pelo administrador.
+                Os pagamentos só entram no total pago
+                depois da confirmação pelo administrador.
             </p>
 
             <div class="details-payment-list">
@@ -771,10 +794,9 @@ require __DIR__ . '/../partials/header.php';
 
                     <p class="details-note">
                         Você não possui uma parte desta despesa
-                        para registrar.
-
-                        Somente o morador responsável ou
-                        um administrador pode fazer o registro.
+                        para registrar pagamentos.
+                        Somente o morador responsável
+                        ou um administrador pode registrar.
                     </p>
 
                 <?php endif; ?>
@@ -809,8 +831,9 @@ require __DIR__ . '/../partials/header.php';
                                 <th>Comprovante</th>
 
                                 <?php if ($ehAdmin): ?>
-                                    <th>Ação</th>
+                                    <th>Ações</th>
                                 <?php endif; ?>
+
                             </tr>
                         </thead>
 
@@ -865,9 +888,7 @@ require __DIR__ . '/../partials/header.php';
                                     <td>
 
                                         <?php if (
-                                            !empty(
-                                                $pagamento['proof_path']
-                                            )
+                                            !empty($pagamento['proof_path'])
                                         ): ?>
 
                                             <a
@@ -891,34 +912,69 @@ require __DIR__ . '/../partials/header.php';
                                                 $pagamento['status'] === 'pending'
                                             ): ?>
 
-                                                <form
-                                                    action="/despesas/pagamento/confirmar"
-                                                    method="post"
-                                                >
+                                                <div class="details-admin-actions">
 
-                                                    <input
-                                                        type="hidden"
-                                                        name="_csrf"
-                                                        value="<?= $esc($csrf) ?>"
+                                                    <!-- CONFIRMAR PAGAMENTO -->
+                                                    <form
+                                                        action="/despesas/pagamento/confirmar"
+                                                        method="post"
                                                     >
 
-                                                    <input
-                                                        type="hidden"
-                                                        name="payment_id"
-                                                        value="<?= (int) $pagamento['id'] ?>"
+                                                        <input
+                                                            type="hidden"
+                                                            name="_csrf"
+                                                            value="<?= $esc($csrf) ?>"
+                                                        >
+
+                                                        <input
+                                                            type="hidden"
+                                                            name="payment_id"
+                                                            value="<?= (int) $pagamento['id'] ?>"
+                                                        >
+
+                                                        <button
+                                                            class="details-btn details-btn-small"
+                                                            type="submit"
+                                                        >
+                                                            Confirmar
+                                                        </button>
+
+                                                    </form>
+
+                                                    <!-- REJEITAR PAGAMENTO -->
+                                                    <form
+                                                        action="/despesas/pagamento/rejeitar"
+                                                        method="post"
+                                                        onsubmit="return confirm('Tem certeza que deseja rejeitar este pagamento?');"
                                                     >
 
-                                                    <button
-                                                        class="details-btn details-btn-small"
-                                                        type="submit"
-                                                    >
-                                                        Confirmar
-                                                    </button>
+                                                        <input
+                                                            type="hidden"
+                                                            name="_csrf"
+                                                            value="<?= $esc($csrf) ?>"
+                                                        >
 
-                                                </form>
+                                                        <input
+                                                            type="hidden"
+                                                            name="payment_id"
+                                                            value="<?= (int) $pagamento['id'] ?>"
+                                                        >
+
+                                                        <button
+                                                            class="details-btn details-btn-small details-btn-reject"
+                                                            type="submit"
+                                                        >
+                                                            Rejeitar
+                                                        </button>
+
+                                                    </form>
+
+                                                </div>
 
                                             <?php else: ?>
+
                                                 —
+
                                             <?php endif; ?>
 
                                         </td>

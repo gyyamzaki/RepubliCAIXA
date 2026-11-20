@@ -1,12 +1,11 @@
-
 <?php
 
 use App\Controllers\AuthController;
-use App\Controllers\DashboardController;
 use App\Controllers\ExpenseController;
 use App\Controllers\ExpenseDetailsController;
 use App\Controllers\ExpenseEditController;
 use App\Controllers\ExpensePaymentController;
+use App\Controllers\ExpensePaymentRejectController;
 use App\Controllers\FinanceController;
 use App\Controllers\MemberController;
 use App\Controllers\ProfileController;
@@ -15,10 +14,10 @@ use App\Middleware\AuthMiddleware;
 
 return [
 
-    // PAGINA INICIAL - PUBLICA
+    // PÁGINA INICIAL
     'GET /' => function (): void {
         require dirname(__DIR__)
-            . '/app/Views/landing.php';
+            . '/app/Views/home.php';
     },
 
     // DASHBOARD
@@ -38,7 +37,7 @@ return [
         (new FinanceController())->handle('store');
     },
 
-    // RELATORIOS
+    // RELATÓRIOS
     'GET /relatorios' => function (): void {
         AuthMiddleware::requireLogin();
         (new FinanceController())->handle('reports');
@@ -49,13 +48,13 @@ return [
         (new FinanceController())->handle('export');
     },
 
-    // DESPESAS - LISTAGEM
+    // LISTAGEM DE DESPESAS
     'GET /despesas' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpenseController())->index();
     },
 
-    // DESPESAS - CADASTRO
+    // CADASTRAR DESPESA
     'GET /despesas/nova' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpenseController())->create();
@@ -66,7 +65,7 @@ return [
         (new ExpenseController())->store();
     },
 
-    // DESPESAS - EDICAO
+    // EDITAR DESPESA
     'GET /despesas/editar' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpenseEditController())->edit();
@@ -77,31 +76,37 @@ return [
         (new ExpenseEditController())->edit();
     },
 
-    // DESPESAS - DETALHES
+    // DETALHES DA DESPESA
     'GET /despesas/detalhes' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpenseDetailsController())->show();
     },
 
-    // PAGAMENTOS - REGISTRO
+    // REGISTRAR PAGAMENTO
     'POST /despesas/pagamento' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpensePaymentController())->store();
     },
 
-    // PAGAMENTOS - CONFIRMACAO
+    // CONFIRMAR PAGAMENTO
     'POST /despesas/pagamento/confirmar' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpensePaymentController())->confirm();
     },
 
-    // COMPROVANTES
+    // REJEITAR PAGAMENTO
+    'POST /despesas/pagamento/rejeitar' => function (): void {
+        AuthMiddleware::requireLogin();
+        (new ExpensePaymentRejectController())->reject();
+    },
+
+    // BAIXAR COMPROVANTE
     'GET /despesas/comprovante' => function (): void {
         AuthMiddleware::requireLogin();
         (new ExpensePaymentController())->proof();
     },
 
-    // AUTENTICACAO - ROTAS PUBLICAS
+    // LOGIN E CADASTRO
     'GET /cadastro' => function (): void {
         (new AuthController())->showRegister();
     },
@@ -122,7 +127,7 @@ return [
         (new AuthController())->logout();
     },
 
-    // REPUBLICAS
+    // REPÚBLICAS
     'GET /republica' => function (): void {
         (new RepublicController())->choose();
     },
